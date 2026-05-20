@@ -8,6 +8,11 @@ export class HUD {
   private readonly directionLabel: Phaser.GameObjects.Text;
   private readonly tackleLabel: Phaser.GameObjects.Text;
   private camera: Phaser.Cameras.Scene2D.Camera | null = null;
+  
+  // Stamina UI
+  private readonly staminaBackground: Phaser.GameObjects.Rectangle;
+  private readonly staminaBar: Phaser.GameObjects.Rectangle;
+  private readonly staminaLabel: Phaser.GameObjects.Text;
 
   constructor(scene: Phaser.Scene) {
     this.panel = scene.add
@@ -45,7 +50,28 @@ export class HUD {
       color: "#ffe6a8",
       stroke: "#000000",
       strokeThickness: 4,
-    }).setDepth(2000).setOrigin(0, 0);
+    }).setDepth(2000).setOrigin(0, 0);    
+    // Stamina bar (bottom right corner)
+    const staminaBarWidth = 200;
+    const staminaBarHeight = 20;
+    
+    this.staminaBackground = scene.add
+      .rectangle(0, 0, staminaBarWidth, staminaBarHeight, 0x000000, 0.6)
+      .setOrigin(1, 1)
+      .setDepth(1999);
+    
+    this.staminaBar = scene.add
+      .rectangle(0, 0, staminaBarWidth - 4, staminaBarHeight - 4, 0x00ff00, 1)
+      .setOrigin(1, 1)
+      .setDepth(2000);
+    
+    this.staminaLabel = scene.add.text(0, 0, "STAMINA", {
+      fontFamily: "Verdana",
+      fontSize: "14px",
+      color: "#ffffff",
+      stroke: "#000000",
+      strokeThickness: 3,
+    }).setDepth(2001).setOrigin(1, 1);
 
     this.layout();
   }
@@ -75,6 +101,23 @@ export class HUD {
     this.tackleLabel.setText(`Tackle: ${current}/${max}`);
     this.layout();
   }
+  
+  updateStamina(percent: number): void {
+    const staminaBarWidth = 200;
+    const maxBarWidth = staminaBarWidth - 4;
+    const currentWidth = maxBarWidth * percent;
+    
+    this.staminaBar.setSize(currentWidth, 16);
+    
+    // Color coding: green > 50%, yellow > 25%, red <= 25%
+    if (percent > 0.5) {
+      this.staminaBar.setFillStyle(0x00ff00);
+    } else if (percent > 0.25) {
+      this.staminaBar.setFillStyle(0xffff00);
+    } else {
+      this.staminaBar.setFillStyle(0xff0000);
+    }
+  }
 
   private layout(): void {
     const marginX = 18;
@@ -98,5 +141,15 @@ export class HUD {
 
     this.panel.setPosition(baseX - 8, baseY - 6);
     this.panel.setSize(widest + 22, 122);
+    
+    // Position stamina bar in bottom right corner
+    if (this.camera) {
+      const staminaX = this.camera.worldView.right - 20;
+      const staminaY = this.camera.worldView.bottom - 20;
+      
+      this.staminaBackground.setPosition(staminaX, staminaY);
+      this.staminaBar.setPosition(staminaX - 2, staminaY - 2);
+      this.staminaLabel.setPosition(staminaX - 105, staminaY - 26);
+    }
   }
 }

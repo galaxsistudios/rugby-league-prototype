@@ -58,6 +58,9 @@ export class TackleController {
     const ballCarrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
 
     if (this.tryBreakTackle(ballCarrier)) return;
+    
+    // Check for stamina-powered tackle (shift held + has stamina)
+    if (this.tryPowerThroughTackle(ballCarrier)) return;
 
     ctx.consecutiveTackleBusts = 0;
     ctx.playTheBallMarkY = ballCarrier.y;
@@ -166,6 +169,53 @@ export class TackleController {
     this.hud.setStatus("Tackle break!");
     return true;
   }
+  
+  // ─── Stamina power through ──────────────────────────────────────────────────
+  
+  private tryPowerThroughTackle(ballCarrier: Player): boolean {
+    const { ctx } = this;
+    
+    // Only works if player is sprinting (shift held) and has stamina
+    if (!ballCarrier.isSprinting || !ballCarrier.hasStamina(10)) return false;
+    
+    // Use 10 stamina for power through attempt
+    ballCarrier.drainStamina(10);
+    
+    // Power through chance based on strength + remaining stamina
+    const strengthFactor = ballCarrier.getStats().strength / 100;
+    const staminaFactor = ballCarrier.getStaminaPercent();
+    const powerChance = strengthFactor * staminaFactor * 0.3; // Up to 30% chance
+    
+    if (Math.random() > powerChance) return false;
+    
+    // Power through successful - push forward 1-2 meters
+    const pushMeters = Phaser.Math.FloatBetween(1.0, 2.0);
+    const fwdDir = ctx.attackDirection === "north" ? -1 : 1;
+    const pushY = Phaser.Math.Clamp(
+      ballCarrier.y + ctx.pitch.metersToPixels(pushMeters) * fwdDir,
+      ctx.pitch.topTryLineY + 20,
+      ctx.pitch.bottomTryLineY - 20,
+    );
+    
+    ballCarrier.setPosition(ballCarrier.x, pushY);
+    ctx.ball.updateFollow();
+    ctx.playTheBallMarkY = pushY;
+    this.hud.setStatus("Powered through the tackle!");
+    
+    // Still gets tackled, but gained ground
+    return false; // Return false to continue with tackle
+  }
+  
+  // ─── Stamina recovery ────────────────────────────────────────────────────────
+  
+  private recoverStaminaOnStoppage(): void {
+    const { ctx } = this;
+    const recoveryAmount = 3; // 3% recovery on stoppages
+    
+    [...ctx.homePlayers, ...ctx.awayPlayers].forEach((player) => {
+      player.recoverStamina(recoveryAmount);
+    });
+  }
 
   // ─── Turnover ────────────────────────────────────────────────────────────────
 
@@ -218,6 +268,10 @@ export class TackleController {
 
   triggerScrum(scrumX: number, scrumY: number, attackerFeeds: boolean): void {
     const { ctx, hud } = this;
+    
+    // Recover 3% stamina for all players on stoppage
+    this.recoverStaminaOnStoppage();
+    
     ctx.isScrumPause = true;
     ctx.scrumWinnerIsAttacker = attackerFeeds;
     ctx.ball.setCarrier(null);

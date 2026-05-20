@@ -195,13 +195,23 @@ export class LineController {
 
     const canRush = !ctx.isInPlayTheBall && ctx.defendersCanAdvance;
     const ballCarrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
+    
+    // Identify fullback and wingers for backline positioning
+    const fullback = ctx.defenders.find(d => d.getRole() === "fullback");
+    const wingers = ctx.defenders.filter(d => d.getRole() === "winger");
+    const isFifthTackle = ctx.currentTackleCount === 5;
+    
+    // Check for line break: ball carrier is past the defensive line
+    const avgDefensiveLineY = ctx.defenders.length > 0
+      ? ctx.defenders.reduce((s, d) => s + d.y, 0) / ctx.defenders.length
+      : baseLineY;
+    const carrierPastLine = forwardDir === -1 
+      ? ballCarrier.y < avgDefensiveLineY 
+      : ballCarrier.y > avgDefensiveLineY;
+    const isLineBreak = carrierPastLine && !ctx.isInPlayTheBall;
 
     if (canRush) {
-      const avgLineY =
-        ctx.defenders.length > 0
-          ? ctx.defenders.reduce((s, d) => s + d.y, 0) / ctx.defenders.length
-          : ballCarrier.y;
-      this.drawOfficialsOnDefensiveLine(avgLineY);
+      this.drawOfficialsOnDefensiveLine(avgDefensiveLineY);
 
       ctx.defenders.forEach((defender) => {
         if (this.scene.tweens.isTweening(defender)) return;
@@ -212,11 +222,68 @@ export class LineController {
         if (toCarrier.lengthSq() < 1) {
           defender.haltHorizontal();
           defender.haltVertical();
+          defender.setSprinting(false);
           return;
         }
         toCarrier.normalize();
+        
+        // AI stamina management: use stamina to sprint if available
+        if (defender.hasStamina(1)) {
+          defender.setSprinting(true);
+          defender.drainStamina(defender.staminaDrainRate * 0.5); // AI drains slower
+        } else {
+          defender.setSprinting(false);
+          defender.recoverStamina(defender.staminaRecoveryRate);
+        }
+        
         const speed = defender.speed * defender.getSpeedMultiplier() * ctx.defensiveChaseSpeedScale;
         defender.setVelocity(toCarrier.x * speed, toCarrier.y * speed);
+      });
+      return;
+    }
+    
+    // Line break handling: only players closer than line chase
+    if (isLineBreak) {
+      this.drawOfficialsOnDefensiveLine(avgDefensiveLineY);
+      
+      ctx.defenders.forEach((defender) => {
+        if (this.scene.tweens.isTweening(defender)) return;
+        
+        // Check if defender is behind the line (should not chase unless close)
+        const defenderBehindLine = forwardDir === -1 
+          ? defender.y > avgDefensiveLineY 
+          : defender.y < avgDefensiveLineY;
+        
+        // Only chase if defender is ahead of or close to the line
+        if (!defenderBehindLine) {
+          const toCarrier = new Phaser.Math.Vector2(
+            ballCarrier.x - defender.x,
+            ballCarrier.y - defender.y,
+          );
+          if (toCarrier.lengthSq() < 1) {
+            defender.haltHorizontal();
+            defender.haltVertical();
+            defender.setSprinting(false);
+            return;
+          }
+          toCarrier.normalize();
+          
+          // AI stamina management for chase
+          if (defender.hasStamina(1)) {
+            defender.setSprinting(true);
+            defender.drainStamina(defender.staminaDrainRate * 0.5);
+          } else {
+            defender.setSprinting(false);
+            defender.recoverStamina(defender.staminaRecoveryRate);
+          }
+          
+          const speed = defender.speed * defender.getSpeedMultiplier() * ctx.defensiveChaseSpeedScale;
+          defender.setVelocity(toCarrier.x * speed, toCarrier.y * speed);
+        } else {
+          // Defender behind line - don't chase, just hold position or move slowly to backline
+          defender.haltHorizontal();
+          defender.haltVertical();
+        }
       });
       return;
     }
@@ -234,23 +301,99 @@ export class LineController {
 
     const startX = pitch.fieldRect.x + 70;
     const endX = pitch.fieldRect.right - 70;
+    const fieldWidth = pitch.fieldRect.width;
+    
+    // Determine which wingers should drop back on 5th tackle
+    const wingersInBackline: Player[] = [];
+    if (isFifthTackle) {
+      wingers.forEach((winger) => {
+        const wingerIndex = ctx.defenders.indexOf(winger);
+        const isInTackle = ctx.markerDefenderIndices.includes(wingerIndex);
+        if (!isInTackle) {
+          wingersInBackline.push(winger);
+        }
+      });
+    }
+    
+    // Build backline array (fullback + eligible wingers)
+    const backlinePlayers: Player[] = [];
+    if (fullback) backlinePlayers.push(fullback);
+    backlinePlayers.push(...wingersInBackline);
 
     ctx.defenders.forEach((defender, index) => {
       if (this.scene.tweens.isTweening(defender)) return;
+      
+      const role = defender.getRole();
+      const isFullback = role === "fullback";
+      const isInBackline = backlinePlayers.includes(defender);
 
-      const laneX = Phaser.Math.Linear(startX, endX, index / 12);
-      const shiftPx = pitch.metersToPixels(ctx.defensiveShiftMeters[index] ?? 0) * forwardDir;
-      const targetY =
-        ctx.isInPlayTheBall && ctx.markerDefenderIndices.includes(index)
-          ? targetLineY - markerAdvancePx * forwardDir
-          : targetLineY + shiftPx;
+      // Fullback or backline positioning
+      if (isFullback || isInBackline) {
+        // Position 30m behind the line, but don't go over goal line
+        const fullbackDepth = pitch.metersToPixels(30);
+        let fullbackY = targetLineY + fullbackDepth * forwardDir;
+        
+        // Clamp to goal lines
+        const goalLineBuffer = pitch.metersToPixels(2);
+        if (forwardDir === -1) {
+          // Attacking north (defending south goal)
+          fullbackY = Math.max(fullbackY, pitch.topTryLineY + goalLineBuffer);
+        } else {
+          // Attacking south (defending north goal)
+          fullbackY = Math.min(fullbackY, pitch.bottomTryLineY - goalLineBuffer);
+        }
+        
+        // Position backline players (left, middle, right)
+        let targetX = ctx.ball.x; // Default: inline with ball
+        
+        if (backlinePlayers.length === 2) {
+          // 2 in backline: one left, one right
+          const backlineIndex = backlinePlayers.indexOf(defender);
+          if (backlineIndex === 0) {
+            targetX = pitch.fieldRect.x + fieldWidth * 0.25; // Left
+          } else {
+            targetX = pitch.fieldRect.x + fieldWidth * 0.75; // Right
+          }
+        } else if (backlinePlayers.length === 3) {
+          // 3 in backline: left, middle, right
+          const backlineIndex = backlinePlayers.indexOf(defender);
+          if (backlineIndex === 0) {
+            targetX = pitch.fieldRect.x + fieldWidth * 0.2; // Left
+          } else if (backlineIndex === 1) {
+            targetX = pitch.fieldRect.centerX; // Middle
+          } else {
+            targetX = pitch.fieldRect.x + fieldWidth * 0.8; // Right
+          }
+        } else if (isFullback) {
+          // Only fullback: stay inline with ball
+          targetX = ctx.ball.x;
+        }
+        
+        // Clamp X to field boundaries
+        targetX = Phaser.Math.Clamp(targetX, startX, endX);
+        
+        defender.haltHorizontal();
+        defender.haltVertical();
+        defender.setPosition(
+          Phaser.Math.Linear(defender.x, targetX, 0.04),
+          Phaser.Math.Linear(defender.y, fullbackY, 0.06),
+        );
+      } else {
+        // Standard defensive line positioning
+        const laneX = Phaser.Math.Linear(startX, endX, index / 12);
+        const shiftPx = pitch.metersToPixels(ctx.defensiveShiftMeters[index] ?? 0) * forwardDir;
+        const targetY =
+          ctx.isInPlayTheBall && ctx.markerDefenderIndices.includes(index)
+            ? targetLineY - markerAdvancePx * forwardDir
+            : targetLineY + shiftPx;
 
-      defender.haltHorizontal();
-      defender.haltVertical();
-      defender.setPosition(
-        Phaser.Math.Linear(defender.x, laneX, 0.04),
-        Phaser.Math.Linear(defender.y, targetY, 0.06),
-      );
+        defender.haltHorizontal();
+        defender.haltVertical();
+        defender.setPosition(
+          Phaser.Math.Linear(defender.x, laneX, 0.04),
+          Phaser.Math.Linear(defender.y, targetY, 0.06),
+        );
+      }
     });
   }
 

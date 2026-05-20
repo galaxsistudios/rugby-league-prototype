@@ -136,7 +136,11 @@ export class PlayScene extends Phaser.Scene {
     const { ctx } = this;
 
     this.hud.attachToCamera(this.cameras.main);
-    ctx.ball.updateFollow();
+    
+    // Only update ball follow when not kicking
+    if (!ctx.isKickInFlight && !ctx.isKickCharging && !ctx.isKickLoose) {
+      ctx.ball.updateFollow();
+    }
 
     // Celebration sequence blocks all gameplay - controllers handle their own tweens
     if (ctx.isTryCelebration) return;
@@ -169,6 +173,9 @@ export class PlayScene extends Phaser.Scene {
     this.line.updateAttackLineAndSupportPlayers();
     this.line.drawControlledPlayerRing();
     this.line.checkDefensiveOffside();
+    
+    // Update stamina UI
+    this.hud.updateStamina(ctx.controlledPlayer.getStaminaPercent());
 
     // â”€â”€ Try detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (Phaser.Geom.Rectangle.Contains(ctx.pitch.topTryZone, ctx.ball.x, ctx.ball.y)) {
@@ -232,19 +239,6 @@ export class PlayScene extends Phaser.Scene {
         ? targetSnapY < passer.y - ctx.pitch.metersToPixels(0.4)
         : targetSnapY > passer.y + ctx.pitch.metersToPixels(0.4);
 
-    if (isForward) {
-      ctx.isForwardPassPause = true;
-      ctx.isTurnoverPause = true;
-      this.line.clearTransientFieldIndicators();
-      this.hud.setStatus("Forward pass! Scrum in 2s...");
-      this.time.delayedCall(2000, () => {
-        ctx.isForwardPassPause = false;
-        ctx.isTurnoverPause = false;
-        this.tackle.triggerScrum(passer.x, passer.y, false);
-      });
-      return;
-    }
-
     const previousCarrier = ctx.controlledPlayer;
     const passDuration = Phaser.Math.Clamp(360 - passer.getStats().passing * 1.4, 180, 360);
     ctx.isBallInFlight = true;
@@ -259,6 +253,8 @@ export class PlayScene extends Phaser.Scene {
 
     const startX = Number(ctx.ball.x);
     const startY = Number(ctx.ball.y);
+    const distance = Phaser.Math.Distance.Between(startX, startY, targetSnapX, targetSnapY);
+    const arcHeight = Math.min(distance * 0.15, 40); // Arc height based on distance
 
     this.tweens.addCounter({
       from: 0,
@@ -267,17 +263,51 @@ export class PlayScene extends Phaser.Scene {
       ease: "Sine.InOut",
       onUpdate: (tween) => {
         const t = Number(tween.getValue());
-        ctx.ball.setPosition(
-          Phaser.Math.Linear(Number(startX), Number(targetSnapX), t),
-          Phaser.Math.Linear(Number(startY), Number(targetSnapY), t),
-        );
+        const baseX = Phaser.Math.Linear(Number(startX), Number(targetSnapX), t);
+        const baseY = Phaser.Math.Linear(Number(startY), Number(targetSnapY), t);
+        
+        // Add arc to the pass
+        const heightProgress = Math.sin(t * Math.PI);
+        const arcOffset = heightProgress * arcHeight;
+        
+        // Ball rotation during pass (360° spin)
+        ctx.ball.setAngle(t * 360);
+        
+        // Ball scaling (slightly larger at peak of arc)
+        const scale = 1 + (heightProgress * 0.2);
+        ctx.ball.setScale(scale);
+        
+        ctx.ball.setPosition(baseX, baseY - arcOffset);
       },
       onComplete: () => {
-        ctx.ball.setCarrier(ctx.controlledPlayer);
-        this.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
-        ctx.isBallInFlight = false;
-        ctx.isLineHeldAfterPass = false;
-        ctx.detachedFromLine.add(previousCarrier);
+        // Reset ball angle and scale
+        ctx.ball.setAngle(0);
+        ctx.ball.setScale(1.0);
+        
+        if (isForward) {
+          // Forward pass detected - trigger penalty after animation
+          ctx.ball.setCarrier(null);
+          ctx.ball.setVisible(true);
+          ctx.isForwardPassPause = true;
+          ctx.isTurnoverPause = true;
+          this.line.clearTransientFieldIndicators();
+          this.hud.setStatus("Forward pass! Scrum in 2s...");
+          this.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+          ctx.isBallInFlight = false;
+          
+          this.time.delayedCall(2000, () => {
+            ctx.isForwardPassPause = false;
+            ctx.isTurnoverPause = false;
+            this.tackle.triggerScrum(passer.x, passer.y, false);
+          });
+        } else {
+          // Valid pass - give ball to receiver
+          ctx.ball.setCarrier(ctx.controlledPlayer);
+          this.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+          ctx.isBallInFlight = false;
+          ctx.isLineHeldAfterPass = false;
+          ctx.detachedFromLine.add(previousCarrier);
+        }
       },
     });
 

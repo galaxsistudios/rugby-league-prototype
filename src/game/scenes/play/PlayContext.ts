@@ -97,8 +97,15 @@ export class PlayContext {
   isKickCharging = false;
   isKickInFlight = false;
   isKickLoose = false;
-  kickOwnerTeamId: "home" | "away" = "home";
-  kickOffsideAttackers = new Set<Player>();
+  kickType: "punt" | "bomb" | "chip" | null = null;
+  kickOwnerTeamId: "home" | "away" = "home";  
+  kickStartY = 0; // Track where kick originated for 40/20 rules
+  kickLastBounceY = 0; // Track last bounce position
+  kickBouncedOut = false; // Did ball bounce before going out
+  kickContestPlayers: Player[] = []; // Players contesting bomb catch
+  // ─── Stamina system ──────────────────────────────────────────────────────────
+  isShiftPressed = false;
+  lastStaminaUpdate = 0;  kickOffsideAttackers = new Set<Player>();
   kickAimForwardMeters = 28;
   kickAimSideMeters = 0;
   kickTargetX = 0;

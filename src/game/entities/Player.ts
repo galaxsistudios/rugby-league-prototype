@@ -12,6 +12,13 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   private role: PlayerRole = "lock";
   private stats: PlayerStats = getDefaultStatsForRole("lock");
   private jerseyNumber = 13;
+  
+  // Stamina system
+  maxStamina = 100;
+  currentStamina = 100;
+  staminaDrainRate = 0.15; // per frame when sprinting
+  staminaRecoveryRate = 0.08; // per frame when not sprinting
+  isSprinting = false;
 
   constructor(scene: Phaser.Scene, x: number, y: number, texture: string) {
     super(scene, x, y, texture);
@@ -61,7 +68,33 @@ export class Player extends Phaser.Physics.Arcade.Sprite {
   }
 
   getSpeedMultiplier(): number {
-    return Phaser.Math.Clamp(this.stats.speed / 75, 0.65, 1.35);
+    const baseMultiplier = Phaser.Math.Clamp(this.stats.speed / 75, 0.65, 1.35);
+    // Apply sprint multiplier if sprinting and has stamina
+    if (this.isSprinting && this.currentStamina > 0) {
+      return baseMultiplier * 1.4; // 40% speed boost when sprinting
+    }
+    return baseMultiplier;
+  }
+  
+  // Stamina management
+  drainStamina(amount: number): void {
+    this.currentStamina = Math.max(0, this.currentStamina - amount);
+  }
+  
+  recoverStamina(amount: number): void {
+    this.currentStamina = Math.min(this.maxStamina, this.currentStamina + amount);
+  }
+  
+  hasStamina(amount: number = 0): boolean {
+    return this.currentStamina > amount;
+  }
+  
+  getStaminaPercent(): number {
+    return this.currentStamina / this.maxStamina;
+  }
+  
+  setSprinting(sprinting: boolean): void {
+    this.isSprinting = sprinting;
   }
 
   moveHorizontal(direction: number): void {

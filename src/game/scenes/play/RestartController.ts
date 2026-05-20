@@ -70,11 +70,47 @@ export class RestartController {
       ? tryLineY + ctx.pitch.metersToPixels(kickDistMeters)
       : tryLineY - ctx.pitch.metersToPixels(kickDistMeters);
 
+    // Get the try scorer (ball carrier) and kicker
+    const tryScorer = ctx.ball.getCarrier();
+    const kickerPlayer = ctx.attackers[10] ?? ctx.attackers[6];
+    const diveDistance = ctx.pitch.metersToPixels(Phaser.Math.FloatBetween(2, 4.5)); // 2-4.5m dive
+    const diveY = tryAtTop ? tryLineY - diveDistance : tryLineY + diveDistance;
+    let finalBallY = tryLineY;
+    
     // Award try
     const tryPoints = scoring.awardTry(team);
-    ctx.ball.setCarrier(null);
-    ctx.ball.setPosition(conversionKickX, tryLineY);
-    ctx.ball.setVisible(true);
+    
+    // Animate the dive
+    if (tryScorer) {
+      scene.tweens.add({
+        targets: tryScorer,
+        y: diveY,
+        angle: tryAtTop ? -15 : 15, // Slight rotation during dive
+        duration: 280,
+        ease: "Quad.Out",
+        onComplete: () => {
+          // Reset rotation
+          tryScorer.setAngle(0);
+          
+          // If try scorer is not the kicker, pass ball to kicker
+          if (tryScorer !== kickerPlayer) {
+            ctx.ball.setCarrier(null);
+            ctx.ball.setPosition(conversionKickX, diveY);
+            ctx.ball.setVisible(true);
+          } else {
+            // Kicker scored - keep ball with them
+            ctx.ball.setCarrier(tryScorer);
+          }
+          finalBallY = diveY;
+        }
+      });
+    } else {
+      // Fallback if no carrier
+      ctx.ball.setCarrier(null);
+      ctx.ball.setPosition(conversionKickX, tryLineY);
+      ctx.ball.setVisible(true);
+      finalBallY = tryLineY;
+    }
     
     // Clear all overlays
     ctx.officialsGraphics.clear();
@@ -95,24 +131,70 @@ export class RestartController {
     scene.tweens.add({
       targets: timeline,
       progress: 1,
-      duration: 5500,
+      duration: 10000, // Extended for ball passing/placement animations
       onUpdate: (tween) => {
         const t = tween.getValue();
         
-        // Phase 1: Celebration formations (t=0.08 or 450ms)
-        if (t >= 0.08 && t < 0.09 && !timeline['phase1Started']) {
+        // Phase 0.5: Pass ball to kicker (t=0.05 or 500ms)
+        if (t >= 0.05 && t < 0.06 && !timeline['phase0Started']) {
+          timeline['phase0Started'] = true;
+          
+          // If try scorer is not the kicker, pass the ball
+          if (tryScorer && tryScorer !== kickerPlayer) {
+            const passDuration = 600;
+            const startX = ctx.ball.x;
+            const startY = ctx.ball.y;
+            const targetX = kickerPlayer.x;
+            const targetY = kickerPlayer.y - 28;
+            const distance = Phaser.Math.Distance.Between(startX, startY, targetX, targetY);
+            const arcHeight = Math.min(distance * 0.12, 35);
+            
+            ctx.ball.setVisible(true);
+            
+            scene.tweens.addCounter({
+              from: 0,
+              to: 1,
+              duration: passDuration,
+              ease: "Sine.InOut",
+              onUpdate: (passTween) => {
+                const pt = passTween.getValue();
+                const baseX = Phaser.Math.Linear(startX, targetX, pt);
+                const baseY = Phaser.Math.Linear(startY, targetY, pt);
+                const heightProgress = Math.sin(pt * Math.PI);
+                const arcOffset = heightProgress * arcHeight;
+                
+                ctx.ball.setAngle(pt * 360); // Ball rotation
+                ctx.ball.setScale(1 + (heightProgress * 0.15)); // Slight scaling
+                ctx.ball.setPosition(baseX, baseY - arcOffset);
+              },
+              onComplete: () => {
+                ctx.ball.setAngle(0);
+                ctx.ball.setScale(1.0);
+                ctx.ball.setCarrier(kickerPlayer);
+              }
+            });
+          } else if (tryScorer === kickerPlayer) {
+            // Kicker scored - already has ball
+            ctx.ball.setCarrier(kickerPlayer);
+          } else {
+            // Fallback: teleport ball to kicker
+            ctx.ball.setCarrier(kickerPlayer);
+          }
+        }
+        
+        // Phase 1: Kicker walks to conversion spot with ball (t=0.12 or 1200ms)
+        if (t >= 0.12 && t < 0.13 && !timeline['phase1Started']) {
           timeline['phase1Started'] = true;
           
-          const kickerPlayer = ctx.attackers[10] ?? ctx.attackers[6];
           const halfwayY = ctx.pitch.getLineYFromTopTryLine(50);
           
-          // Kicker to conversion spot
+          // Kicker walks to conversion spot (ball follows automatically via carrier)
           scene.tweens.add({
             targets: kickerPlayer,
             x: conversionKickX,
             y: kickerFieldY,
-            duration: 900,
-            ease: "Sine.Out",
+            duration: 1400,
+            ease: "Sine.InOut",
           });
 
           // Rest circle at halfway
@@ -128,28 +210,52 @@ export class RestartController {
             });
           });
 
-          // Defenders behind goal line
+          // Defenders behind goal line - OPPOSITE side of goal post from kick
+          const kickIsLeft = conversionKickX < cx;
           const inGoalY = tryAtTop
             ? ctx.pitch.fieldRect.y + ctx.pitch.metersToPixels(4)
             : ctx.pitch.fieldRect.bottom - ctx.pitch.metersToPixels(4);
+          
+          // Position defenders on opposite side
+          const defenderCenterX = kickIsLeft ? cx + 80 : cx - 80;
 
           ctx.defenders.forEach((p, i) => {
             const angle = Math.PI + (i / ctx.defenders.length) * Math.PI;
             scene.tweens.add({
               targets: p,
-              x: cx + Math.cos(angle) * 62 + Phaser.Math.FloatBetween(-8, 8),
-              y: inGoalY + Math.sin(angle) * 30,
+              x: defenderCenterX + Math.cos(angle) * 55 + Phaser.Math.FloatBetween(-8, 8),
+              y: inGoalY + Math.sin(angle) * 28,
               duration: 850,
               ease: "Sine.Out",
             });
           });
         }
         
-        // Phase 2: Conversion (t=0.4 or 2200ms)
+        // Phase 1.5: Kicker places ball down (t=0.35 or 3500ms)
+        if (t >= 0.35 && t < 0.36 && !timeline['phase1_5Started']) {
+          timeline['phase1_5Started'] = true;
+          
+          // Kicker releases ball and places it down
+          ctx.ball.setCarrier(null);
+          ctx.ball.setVisible(true);
+          ctx.ball.setPosition(conversionKickX, kickerFieldY);
+          ctx.ball.setAngle(0);
+          ctx.ball.setScale(1.0);
+          
+          // Ball placement animation (vertical placement like kickoff)
+          scene.tweens.add({
+            targets: ctx.ball,
+            angle: 90, // Rotate to vertical
+            duration: 300,
+            ease: "Quad.Out",
+          });
+        }
+        
+        // Phase 2: Conversion kick animation (t=0.4 or 4000ms)
         if (t >= 0.4 && t < 0.41 && !timeline['phase2Started']) {
           timeline['phase2Started'] = true;
           
-          ctx.ball.setVisible(false);
+          // Calculate conversion outcome
           const conversion = scoring.attemptConversion(
             team,
             conversionKickX,
@@ -157,46 +263,232 @@ export class RestartController {
             ctx.pitch.fieldRect.width / 2,
             settings.placeKickSkill,
           );
-          hud.updateScore(ctx.home, ctx.away);
-          hud.setStatus(
-            conversion.success
-              ? `Conversion good!  +${conversion.points}  —  ${team.name}: ${team.score}`
-              : `Conversion missed  —  ${team.name}: ${team.score}`,
-          );
+          
+          // Goal post dimensions
+          const postHalfWidth = 48;
+          const postHeight = tryAtTop ? -126 : 126;
+          const leftPostX = cx - postHalfWidth;
+          const rightPostX = cx + postHalfWidth;
+          const crossbarY = tryLineY + postHeight;
+          
+          // Ball is already vertical and positioned from Phase 1.5
+          
+          // Calculate kick trajectory
+          let targetX = cx; // Default: center
+          let targetY = crossbarY;
+          let hitPost = false;
+          let missDirection: 'left' | 'right' | null = null;
+          
+          if (conversion.success) {
+            // Success: goes through the posts (slightly randomized)
+            targetX = cx + Phaser.Math.FloatBetween(-35, 35);
+            targetY = crossbarY + (tryAtTop ? -40 : 40); // Above/below crossbar
+          } else {
+            // Miss: calculate how far off
+            const difficulty = Math.abs(conversionKickX - cx) / (ctx.pitch.fieldRect.width / 2);
+            const isBadMiss = Math.random() < 0.08; // 8% chance of really bad miss
+            const isCloseMiss = Math.random() < 0.35; // 35% chance of close miss
+            const isPostHit = Math.random() < 0.15 && !isBadMiss; // 15% chance to hit post
+            
+            if (isPostHit) {
+              hitPost = true;
+              missDirection = conversionKickX < cx ? 'left' : 'right';
+              targetX = missDirection === 'left' ? leftPostX : rightPostX;
+              targetY = crossbarY + Phaser.Math.FloatBetween(10, 60) * (tryAtTop ? -1 : 1);
+            } else if (isBadMiss) {
+              missDirection = conversionKickX < cx ? 'left' : 'right';
+              const missAmount = Phaser.Math.FloatBetween(70, 140);
+              targetX = missDirection === 'left' ? leftPostX - missAmount : rightPostX + missAmount;
+              targetY = crossbarY + Phaser.Math.FloatBetween(-20, 40) * (tryAtTop ? -1 : 1);
+            } else if (isCloseMiss) {
+              missDirection = conversionKickX < cx ? 'left' : 'right';
+              const missAmount = Phaser.Math.FloatBetween(12, 45);
+              targetX = missDirection === 'left' ? leftPostX - missAmount : rightPostX + missAmount;
+              targetY = crossbarY + Phaser.Math.FloatBetween(-10, 30) * (tryAtTop ? -1 : 1);
+            } else {
+              // Regular miss
+              missDirection = conversionKickX < cx ? 'left' : 'right';
+              const missAmount = Phaser.Math.FloatBetween(50, 85);
+              targetX = missDirection === 'left' ? leftPostX - missAmount : rightPostX + missAmount;
+              targetY = crossbarY + Phaser.Math.FloatBetween(-15, 35) * (tryAtTop ? -1 : 1);
+            }
+          }
+          
+          // Animate the kick
+          const kickDuration = 850;
+          scene.tweens.add({
+            targets: ctx.ball,
+            x: targetX,
+            y: targetY,
+            duration: kickDuration,
+            ease: "Quad.InOut",
+            onUpdate: (tween) => {
+              // Arc effect: ball goes up then down
+              const progress = tween.progress;
+              const arcHeight = 80;
+              const arc = Math.sin(progress * Math.PI) * arcHeight;
+              const baseY = Phaser.Math.Linear(kickerFieldY, targetY, progress);
+              ctx.ball.setY(baseY - arc * (tryAtTop ? 1 : -1));
+              
+              // Ball rotation during flight (spinning end-over-end)
+              const rotationSpeed = 720; // degrees per complete animation
+              ctx.ball.setAngle(90 + (progress * rotationSpeed));
+              
+              // Ball scaling: larger as it goes higher
+              const heightProgress = Math.sin(progress * Math.PI); // 0 -> 1 -> 0
+              const scaleMultiplier = 1 + (heightProgress * 0.4); // Scale up to 1.4x at peak
+              ctx.ball.setScale(scaleMultiplier);
+            },
+            onComplete: () => {
+              if (hitPost) {
+                // Ball hits post and deflects
+                const deflectX = missDirection === 'left' ? leftPostX - 60 : rightPostX + 60;
+                const deflectY = targetY + Phaser.Math.FloatBetween(30, 50) * (tryAtTop ? 1 : -1);
+                
+                scene.tweens.add({
+                  targets: ctx.ball,
+                  x: deflectX,
+                  y: deflectY,
+                  duration: 350,
+                  ease: "Bounce.Out",
+                  onUpdate: (tween) => {
+                    // Continue rotation and scaling during deflection
+                    const progress = tween.progress;
+                    ctx.ball.setAngle(ctx.ball.angle + 12);
+                    ctx.ball.setScale(1.4 - (progress * 0.6)); // Scale down as it falls
+                  },
+                  onComplete: () => {
+                    ctx.ball.setVisible(false);
+                    ctx.ball.setAngle(0);
+                    ctx.ball.setScale(1);
+                  }
+                });
+              } else {
+                // Ball continues past posts or through them
+                ctx.ball.setVisible(false);
+                ctx.ball.setAngle(0);
+                ctx.ball.setScale(1);
+              }
+              
+              // Update HUD
+              hud.updateScore(ctx.home, ctx.away);
+              hud.setStatus(
+                conversion.success
+                  ? `Conversion good!  +${conversion.points}  —  ${team.name}: ${team.score}`
+                  : hitPost
+                  ? `Conversion hit the post!  —  ${team.name}: ${team.score}`
+                  : `Conversion missed  —  ${team.name}: ${team.score}`,
+              );
+            }
+          });
+          
+          // Store conversion result for Phase 3
+          timeline['conversionSuccess'] = conversion.success;
         }
         
-        // Phase 3: Kickoff setup (t=0.64 or 3500ms)
-        if (t >= 0.64 && t < 0.65 && !timeline['phase3Started']) {
+        // Phase 3: Return to positions and kickoff setup (t=0.62 or 6200ms)
+        if (t >= 0.62 && t < 0.63 && !timeline['phase3Started']) {
           timeline['phase3Started'] = true;
           
           ctx.officialsGraphics.clear();
           ctx.celebrationGraphics.clear();
-          hud.setStatus("Teams lining up for kickoff...");
-
+          
           const halfwayY = ctx.pitch.getLineYFromTopTryLine(50);
-          scene.cameras.main.pan(cx, halfwayY, 800, "Sine.InOut");
-
           const kickingPlayers = concedingTeam === ctx.home ? ctx.homePlayers : ctx.awayPlayers;
           const receivingPlayers = concedingTeam === ctx.home ? ctx.awayPlayers : ctx.homePlayers;
           
-          const kickoffY = getKickoffCarrierY(ctx.pitch, ctx.attackDirection);
-          const kickerY = getKickingTeamKickoffY(ctx.pitch, ctx.attackDirection);
+          // Find the goal kicker (slot 6 from attacking team)
+          const kickerPlayer = ctx.attackers[10] ?? ctx.attackers[6];
+          
           const startX = ctx.pitch.fieldRect.x + 70;
           const endX = ctx.pitch.fieldRect.right - 70;
           
-          receivingPlayers.forEach((p, i) => {
-            p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), kickoffY);
+          // Calculate kicker's destination at 50m line
+          const kickerIndex = receivingPlayers.indexOf(kickerPlayer);
+          const kickerDestX = Phaser.Math.Linear(startX, endX, kickerIndex / 12);
+          const receivingY = getKickoffCarrierY(ctx.pitch, ctx.attackDirection);
+          
+          // Add depth for kicker position (slightly deeper as center player)
+          const kickerDepthFactor = Math.sin((kickerIndex / 12) * Math.PI) * 0.5;
+          const kickerDepthOffset = ctx.pitch.metersToPixels(8) * kickerDepthFactor;
+          const kickerDestY = ctx.attackDirection === "south" 
+            ? receivingY + kickerDepthOffset 
+            : receivingY - kickerDepthOffset;
+          
+          hud.setStatus("Returning to positions for kickoff...");
+          
+          // Follow the kicker back to their position
+          scene.cameras.main.startFollow(kickerPlayer, true, 0.08, 0.08); // Slower lerp for smoother follow
+          
+          // Move kicker to their kickoff position (slowed down)
+          scene.tweens.add({
+            targets: kickerPlayer,
+            x: kickerDestX,
+            y: kickerDestY,
+            duration: 2400, // Slowed from 1200 to 2400ms
+            ease: "Sine.InOut",
+            onUpdate: (tween) => {
+              // When kicker is 65% of the way there, start panning camera to kicking team
+              if (tween.progress >= 0.65 && !timeline['cameraPanStarted']) {
+                timeline['cameraPanStarted'] = true;
+                scene.cameras.main.stopFollow();
+                
+                // Pan towards the kicking team at 50m line
+                scene.tweens.add({
+                  targets: scene.cameras.main,
+                  scrollX: cx - scene.cameras.main.width / 2,
+                  scrollY: halfwayY - scene.cameras.main.height / 2,
+                  duration: 1200,
+                  ease: "Sine.InOut"
+                });
+              }
+            }
           });
           
+          // Rest of scoring team spreads out in receiving formation (maintain left-right order with depth)
+          receivingPlayers.forEach((p, i) => {
+            if (p === kickerPlayer) return; // Already moved above
+            
+            const baseX = Phaser.Math.Linear(startX, endX, i / 12);
+            const depthFactor = Math.sin((i / 12) * Math.PI) * 0.5;
+            const depthOffset = ctx.pitch.metersToPixels(8) * depthFactor;
+            const yPos = ctx.attackDirection === "south" 
+              ? receivingY + depthOffset 
+              : receivingY - depthOffset;
+            
+            scene.tweens.add({
+              targets: p,
+              x: baseX,
+              y: yPos,
+              duration: 2400, // Match kicker's duration
+              ease: "Sine.InOut",
+            });
+          });
+          
+          // Conceding team (kicking team) runs to 50m line simultaneously
           kickingPlayers.forEach((p, i) => {
-            p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), kickerY);
+            scene.tweens.add({
+              targets: p,
+              x: Phaser.Math.Linear(startX, endX, i / 12),
+              y: halfwayY,
+              duration: 2400, // Match other players
+              ease: "Sine.InOut",
+              onComplete: () => {
+                // All players are in position - update status
+                if (i === 6) { // When the main kicker is in position
+                  scene.time.delayedCall(300, () => {
+                    hud.setStatus("Ready for kickoff...");
+                  });
+                }
+              },
+            });
           });
 
           this.resetSetState();
         }
         
-        // Phase 4: Kickoff (t=0.82 or 4500ms)
-        if (t >= 0.82 && t < 0.83 && !timeline['phase4Started']) {
+        // Phase 4: Kickoff (t=0.87 or 8700ms - after teams settle and camera pan)
+        if (t >= 0.87 && t < 0.88 && !timeline['phase4Started']) {
           timeline['phase4Started'] = true;
           
           const kickingPlayers = concedingTeam === ctx.home ? ctx.homePlayers : ctx.awayPlayers;
@@ -211,48 +503,85 @@ export class RestartController {
           ];
           const receiver = receivingPlayers[receiverSlot];
           
+          // Position ball with kicker - VERTICAL for place kick
           ctx.ball.setCarrier(null);
           ctx.ball.setVisible(true);
           ctx.ball.setPosition(kicker.x, kicker.y - 22);
+          ctx.ball.setAngle(90); // Vertical orientation for kickoff
+          ctx.ball.setScale(1);
 
           hud.setStatus(`Kickoff — to #${ctx.rugbyLeagueNumberBySlot[receiverSlot]}`);
 
-          scene.tweens.add({
-            targets: ctx.ball,
-            x: receiver.x,
-            y: receiver.y - 28,
-            duration: 980,
-            ease: "Sine.Out",
-            onComplete: () => {
-              ctx.ball.setCarrier(receiver);
-              ctx.attackingTeamId = receivingPlayers === ctx.homePlayers ? "home" : "away";
-              ctx.syncTeamRoles();
-              
-              if (ctx.homePlayers.includes(receiver)) {
-                ctx.controlledPlayer = receiver;
-              } else {
-                ctx.controlledPlayer = ctx.homePlayers.reduce((closest, p) => {
-                  const d1 = Phaser.Math.Distance.Between(p.x, p.y, receiver.x, receiver.y);
-                  const d2 = Phaser.Math.Distance.Between(closest.x, closest.y, receiver.x, receiver.y);
-                  return d1 < d2 ? p : closest;
-                });
-              }
-              
-              ctx.controlledPlayer.setScale(1.12);
-              ctx.movement.setControlledPlayer(ctx.controlledPlayer);
-              scene.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+          // Kick the ball to the receiver after a brief pause
+          scene.time.delayedCall(600, () => {
+            // Camera follows the ball during kickoff
+            scene.cameras.main.startFollow(ctx.ball, true, 0.14, 0.14);
+            
+            const kickDistance = Phaser.Math.Distance.Between(kicker.x, kicker.y, receiver.x, receiver.y);
+            const kickDuration = Math.min(1200, 800 + kickDistance * 0.8);
+            
+            scene.tweens.add({
+              targets: ctx.ball,
+              x: receiver.x,
+              y: receiver.y - 28,
+              duration: kickDuration,
+              ease: "Sine.InOut",
+              onUpdate: (tween) => {
+                // Add arc to kickoff flight
+                const progress = tween.progress;
+                const arcHeight = Math.min(100, kickDistance * 0.18);
+                const arc = Math.sin(progress * Math.PI) * arcHeight;
+                const baseY = Phaser.Math.Linear(kicker.y - 22, receiver.y - 28, progress);
+                ctx.ball.setY(baseY - arc);
+                
+                // Ball rotation during flight (end-over-end spin)
+                const rotationSpeed = 540; // degrees
+                ctx.ball.setAngle(90 + (progress * rotationSpeed));
+                
+                // Ball scaling: larger as it goes higher
+                const heightProgress = Math.sin(progress * Math.PI);
+                const scaleMultiplier = 1 + (heightProgress * 0.35);
+                ctx.ball.setScale(scaleMultiplier);
+              },
+              onComplete: () => {
+                // Reset ball orientation and scale
+                ctx.ball.setAngle(0);
+                ctx.ball.setScale(1);
+                
+                // Give ball to receiver
+                ctx.ball.setCarrier(receiver);
+                ctx.attackingTeamId = receivingPlayers === ctx.homePlayers ? "home" : "away";
+                ctx.syncTeamRoles();
+                
+                // Set controlled player
+                if (ctx.homePlayers.includes(receiver)) {
+                  ctx.controlledPlayer = receiver;
+                } else {
+                  ctx.controlledPlayer = ctx.homePlayers.reduce((closest, p) => {
+                    const d1 = Phaser.Math.Distance.Between(p.x, p.y, receiver.x, receiver.y);
+                    const d2 = Phaser.Math.Distance.Between(closest.x, closest.y, receiver.x, receiver.y);
+                    return d1 < d2 ? p : closest;
+                  });
+                }
+                
+                ctx.controlledPlayer.setScale(1.12);
+                ctx.movement.setControlledPlayer(ctx.controlledPlayer);
+                scene.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
 
-              ctx.attackingLineY = receiver.y - 28;
-              ctx.previousCarrierY = receiver.y;
-              this.line.reseedDefensiveShift();
-              this.line.positionDefenders();
+                // Set up play state
+                ctx.attackingLineY = receiver.y - 28;
+                ctx.previousCarrierY = receiver.y;
+                this.line.reseedDefensiveShift();
+                this.line.positionDefenders();
 
-              hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
-              hud.setStatus("Kickoff received! Drive to the line.");
-              
-              ctx.isTryCelebration = false;
-              stateManager.kickoff();
-            },
+                hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
+                hud.setStatus("Kickoff received! Drive to the line.");
+                
+                // Resume play
+                ctx.isTryCelebration = false;
+                stateManager.kickoff();
+              },
+            });
           });
         }
       },
