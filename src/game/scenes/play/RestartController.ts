@@ -47,38 +47,16 @@ export class RestartController {
   // ─── Try scoring — full animated sequence ────────────────────────────────────
 
   completeTry(team: Team, endLabel: string): void {
-    const { ctx, hud, scoring, settings, scene } = this;
-    if (ctx.isTryCelebration) return; // guard re-entry
-
-    let kickoffResetStarted = false;
-    const beginKickoffReset = () => {
-      if (kickoffResetStarted) return;
-      kickoffResetStarted = true;
-
-      // ── Phase 3: Run back ──────────────────────────────────────────────────
-      ctx.officialsGraphics.clear();
-      ctx.celebrationGraphics.clear();
-      ctx.controlledPlayerRingGraphics.clear();
-      hud.setStatus("Teams lining up for kickoff...");
-
-      const halfwayY = ctx.pitch.getLineYFromTopTryLine(50);
-      scene.cameras.main.pan(cx, halfwayY, 1400, "Sine.InOut");
-
-      this.animateRunBack(concedingTeam);
-
-      // ── Phase 4: Kickoff flight (after run-back tween completes) ──────────
-      scene.time.delayedCall(1600, () => {
-        this.resetSetState();
-        this.animateKickoffFlight(concedingTeam);
-      });
-    };
+    const { ctx, hud, scoring, settings, scene, stateManager } = this;
+    if (ctx.isTryCelebration) return;
 
     ctx.isTryCelebration = true;
 
-    // Halt all players immediately
+    // Halt all players
     [...ctx.homePlayers, ...ctx.awayPlayers].forEach((p) => {
       p.haltHorizontal();
       p.haltVertical();
+      p.setScale(1);
     });
 
     const conversionKickX = ctx.ball.x;
@@ -87,18 +65,18 @@ export class RestartController {
     const cx = ctx.pitch.fieldRect.centerX;
     const concedingTeam = team === ctx.home ? ctx.away : ctx.home;
 
-    // Kicker (halfback, slot 10) positions 10–30 m from the try line into the field
     const kickDistMeters = Phaser.Math.Between(10, 30);
     const kickerFieldY = tryAtTop
       ? tryLineY + ctx.pitch.metersToPixels(kickDistMeters)
       : tryLineY - ctx.pitch.metersToPixels(kickDistMeters);
-    const kickerPlayer = ctx.attackers[10] ?? ctx.attackers[6];
 
-    // Award try; ball stays on the try line (where it was grounded)
+    // Award try
     const tryPoints = scoring.awardTry(team);
     ctx.ball.setCarrier(null);
     ctx.ball.setPosition(conversionKickX, tryLineY);
     ctx.ball.setVisible(true);
+    
+    // Clear all overlays
     ctx.officialsGraphics.clear();
     ctx.celebrationGraphics.clear();
     ctx.controlledPlayerRingGraphics.clear();
@@ -109,54 +87,175 @@ export class RestartController {
     hud.setStatus(`TRY!  ${team.name}  +${tryPoints} pts`);
     hud.setTackleCount(0, ctx.maxTackles);
 
-    // Detach camera so the full formation is visible
     scene.cameras.main.stopFollow();
 
-    // ── Phase 1 (450ms): slight pause, then formations / kicker run-up ──────
-    scene.time.delayedCall(450, () => {
-      this.showCelebrationFormation(
-        tryAtTop,
-        tryLineY,
-        kickerPlayer,
-        kickerFieldY,
-        conversionKickX,
-      );
-    });
+    // Use a counter tween to sequence everything (bypasses scene.time blocking)
+    const timeline = { progress: 0 };
+    
+    scene.tweens.add({
+      targets: timeline,
+      progress: 1,
+      duration: 5500,
+      onUpdate: (tween) => {
+        const t = tween.getValue();
+        
+        // Phase 1: Celebration formations (t=0.08 or 450ms)
+        if (t >= 0.08 && t < 0.09 && !timeline['phase1Started']) {
+          timeline['phase1Started'] = true;
+          
+          const kickerPlayer = ctx.attackers[10] ?? ctx.attackers[6];
+          const halfwayY = ctx.pitch.getLineYFromTopTryLine(50);
+          
+          // Kicker to conversion spot
+          scene.tweens.add({
+            targets: kickerPlayer,
+            x: conversionKickX,
+            y: kickerFieldY,
+            duration: 900,
+            ease: "Sine.Out",
+          });
 
-    // ── Phase 2 (2200ms): Conversion (after run-up completes) ───────────────
-    scene.time.delayedCall(2200, () => {
-      // Remove the normal gameplay ball before the conversion animation
-      ctx.ball.setVisible(false);
-      const conversion = scoring.attemptConversion(
-        team,
-        conversionKickX,
-        cx,
-        ctx.pitch.fieldRect.width / 2,
-        settings.placeKickSkill,
-      );
-      hud.updateScore(ctx.home, ctx.away);
-      this.drawConversionTouchJudges(tryLineY, tryAtTop, cx);
+          // Rest circle at halfway
+          const nonKickers = ctx.attackers.filter((p) => p !== kickerPlayer);
+          nonKickers.forEach((p, i) => {
+            const angle = (i / nonKickers.length) * Math.PI * 2;
+            scene.tweens.add({
+              targets: p,
+              x: cx + Math.cos(angle) * 68 + Phaser.Math.FloatBetween(-10, 10),
+              y: halfwayY + Math.sin(angle) * 36 + Phaser.Math.FloatBetween(-10, 10),
+              duration: 900,
+              ease: "Sine.Out",
+            });
+          });
 
-      this.animateConversionKick(
-        conversionKickX,
-        kickerFieldY,
-        tryLineY,
-        tryAtTop,
-        conversion.success,
-        () => {
+          // Defenders behind goal line
+          const inGoalY = tryAtTop
+            ? ctx.pitch.fieldRect.y + ctx.pitch.metersToPixels(4)
+            : ctx.pitch.fieldRect.bottom - ctx.pitch.metersToPixels(4);
+
+          ctx.defenders.forEach((p, i) => {
+            const angle = Math.PI + (i / ctx.defenders.length) * Math.PI;
+            scene.tweens.add({
+              targets: p,
+              x: cx + Math.cos(angle) * 62 + Phaser.Math.FloatBetween(-8, 8),
+              y: inGoalY + Math.sin(angle) * 30,
+              duration: 850,
+              ease: "Sine.Out",
+            });
+          });
+        }
+        
+        // Phase 2: Conversion (t=0.4 or 2200ms)
+        if (t >= 0.4 && t < 0.41 && !timeline['phase2Started']) {
+          timeline['phase2Started'] = true;
+          
+          ctx.ball.setVisible(false);
+          const conversion = scoring.attemptConversion(
+            team,
+            conversionKickX,
+            cx,
+            ctx.pitch.fieldRect.width / 2,
+            settings.placeKickSkill,
+          );
+          hud.updateScore(ctx.home, ctx.away);
           hud.setStatus(
             conversion.success
               ? `Conversion good!  +${conversion.points}  —  ${team.name}: ${team.score}`
               : `Conversion missed  —  ${team.name}: ${team.score}`,
           );
-        },
-        beginKickoffReset,
-      );
+        }
+        
+        // Phase 3: Kickoff setup (t=0.64 or 3500ms)
+        if (t >= 0.64 && t < 0.65 && !timeline['phase3Started']) {
+          timeline['phase3Started'] = true;
+          
+          ctx.officialsGraphics.clear();
+          ctx.celebrationGraphics.clear();
+          hud.setStatus("Teams lining up for kickoff...");
 
-      // Failsafe: if conversion flash callback doesn't fire, force kickoff reset.
-      scene.time.delayedCall(2600, () => {
-        if (ctx.isTryCelebration) beginKickoffReset();
-      });
+          const halfwayY = ctx.pitch.getLineYFromTopTryLine(50);
+          scene.cameras.main.pan(cx, halfwayY, 800, "Sine.InOut");
+
+          const kickingPlayers = concedingTeam === ctx.home ? ctx.homePlayers : ctx.awayPlayers;
+          const receivingPlayers = concedingTeam === ctx.home ? ctx.awayPlayers : ctx.homePlayers;
+          
+          const kickoffY = getKickoffCarrierY(ctx.pitch, ctx.attackDirection);
+          const kickerY = getKickingTeamKickoffY(ctx.pitch, ctx.attackDirection);
+          const startX = ctx.pitch.fieldRect.x + 70;
+          const endX = ctx.pitch.fieldRect.right - 70;
+          
+          receivingPlayers.forEach((p, i) => {
+            p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), kickoffY);
+          });
+          
+          kickingPlayers.forEach((p, i) => {
+            p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), kickerY);
+          });
+
+          this.resetSetState();
+        }
+        
+        // Phase 4: Kickoff (t=0.82 or 4500ms)
+        if (t >= 0.82 && t < 0.83 && !timeline['phase4Started']) {
+          timeline['phase4Started'] = true;
+          
+          const kickingPlayers = concedingTeam === ctx.home ? ctx.homePlayers : ctx.awayPlayers;
+          const receivingPlayers = concedingTeam === ctx.home ? ctx.awayPlayers : ctx.homePlayers;
+          
+          const kicker = kickingPlayers[6];
+          const halfSlots = [2, 10];
+          const forwardSlots = [4, 6, 7, 8, 9];
+          const isHalf = Math.random() < 0.87;
+          const receiverSlot = (isHalf ? halfSlots : forwardSlots)[
+            Math.floor(Math.random() * (isHalf ? 2 : 5))
+          ];
+          const receiver = receivingPlayers[receiverSlot];
+          
+          ctx.ball.setCarrier(null);
+          ctx.ball.setVisible(true);
+          ctx.ball.setPosition(kicker.x, kicker.y - 22);
+
+          hud.setStatus(`Kickoff — to #${ctx.rugbyLeagueNumberBySlot[receiverSlot]}`);
+
+          scene.tweens.add({
+            targets: ctx.ball,
+            x: receiver.x,
+            y: receiver.y - 28,
+            duration: 980,
+            ease: "Sine.Out",
+            onComplete: () => {
+              ctx.ball.setCarrier(receiver);
+              ctx.attackingTeamId = receivingPlayers === ctx.homePlayers ? "home" : "away";
+              ctx.syncTeamRoles();
+              
+              if (ctx.homePlayers.includes(receiver)) {
+                ctx.controlledPlayer = receiver;
+              } else {
+                ctx.controlledPlayer = ctx.homePlayers.reduce((closest, p) => {
+                  const d1 = Phaser.Math.Distance.Between(p.x, p.y, receiver.x, receiver.y);
+                  const d2 = Phaser.Math.Distance.Between(closest.x, closest.y, receiver.x, receiver.y);
+                  return d1 < d2 ? p : closest;
+                });
+              }
+              
+              ctx.controlledPlayer.setScale(1.12);
+              ctx.movement.setControlledPlayer(ctx.controlledPlayer);
+              scene.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+
+              ctx.attackingLineY = receiver.y - 28;
+              ctx.previousCarrierY = receiver.y;
+              this.line.reseedDefensiveShift();
+              this.line.positionDefenders();
+
+              hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
+              hud.setStatus("Kickoff received! Drive to the line.");
+              
+              ctx.isTryCelebration = false;
+              stateManager.kickoff();
+            },
+          });
+        }
+      },
     });
   }
 
@@ -336,19 +435,22 @@ export class RestartController {
     ctx.isLineHeldAfterPass = false;
     ctx.isBallInFlight = false;
 
+    const kickingPlayers = kickingTeam === ctx.home ? ctx.homePlayers : ctx.awayPlayers;
+    const receivingPlayers = kickingTeam === ctx.home ? ctx.awayPlayers : ctx.homePlayers;
+
     const kickoffY = getKickoffCarrierY(ctx.pitch, ctx.attackDirection);
     const kickerY = getKickingTeamKickoffY(ctx.pitch, ctx.attackDirection);
     const startX = ctx.pitch.fieldRect.x + 70;
     const endX = ctx.pitch.fieldRect.right - 70;
 
-    const kickingPlayers = kickingTeam === ctx.home ? ctx.homePlayers : ctx.awayPlayers;
-    const receivingPlayers = kickingTeam === ctx.home ? ctx.awayPlayers : ctx.homePlayers;
+    // Reset all player scales first
+    [...ctx.homePlayers, ...ctx.awayPlayers].forEach(p => p.setScale(1));
 
     receivingPlayers.forEach((p, i) => {
-      p.setScale(1);
+      const targetX = Phaser.Math.Linear(startX, endX, i / 12);
       scene.tweens.add({
         targets: p,
-        x: Phaser.Math.Linear(startX, endX, i / 12),
+        x: targetX,
         y: kickoffY,
         duration: 1400,
         ease: "Sine.InOut",
@@ -356,10 +458,10 @@ export class RestartController {
     });
 
     kickingPlayers.forEach((p, i) => {
-      p.setScale(1);
+      const targetX = Phaser.Math.Linear(startX, endX, i / 12);
       scene.tweens.add({
         targets: p,
-        x: Phaser.Math.Linear(startX, endX, i / 12),
+        x: targetX,
         y: kickerY,
         duration: 1400,
         ease: "Sine.InOut",
@@ -377,6 +479,12 @@ export class RestartController {
 
     // Central player (index 6, jersey 9) takes the kick.
     const kicker = kickingPlayers[6];
+    if (!kicker) {
+      console.error("Kicker not found!");
+      ctx.isTryCelebration = false;
+      stateManager.kickoff();
+      return;
+    }
 
     // 87 % → half (jersey 6 = slot 2, jersey 7 = slot 10)
     // 13 % → forward (slots 4,6,7,8,9 = jerseys 8,9,10,11,12)
@@ -386,6 +494,14 @@ export class RestartController {
     const pool = isHalf ? halfSlots : forwardSlots;
     const receiverSlot = pool[Math.floor(Math.random() * pool.length)];
     const receiver = receivingPlayers[receiverSlot];
+    
+    if (!receiver) {
+      console.error("Receiver not found!");
+      ctx.isTryCelebration = false;
+      stateManager.kickoff();
+      return;
+    }
+    
     const jerseyNum = ctx.rugbyLeagueNumberBySlot[receiverSlot];
 
     ctx.ball.setCarrier(null);
@@ -406,10 +522,24 @@ export class RestartController {
       ctx.ball.setCarrier(receiver);
       ctx.ball.updateFollow();
 
+      // Set attacking team to the receiving team
       ctx.attackingTeamId = receivingPlayers === ctx.homePlayers ? "home" : "away";
       ctx.syncTeamRoles();
 
-      ctx.syncControlledPlayerToHomeTeam(scene.cameras.main, true);
+      // Sync controlled player and camera
+      if (ctx.homePlayers.includes(receiver)) {
+        ctx.controlledPlayer = receiver;
+      } else {
+        const closestHome = ctx.homePlayers.reduce((closest, p) => {
+          const dist = Phaser.Math.Distance.Between(p.x, p.y, receiver.x, receiver.y);
+          const closestDist = Phaser.Math.Distance.Between(closest.x, closest.y, receiver.x, receiver.y);
+          return dist < closestDist ? p : closest;
+        });
+        ctx.controlledPlayer = closestHome;
+      }
+      
+      ctx.controlledPlayer.setScale(1.12);
+      ctx.movement.setControlledPlayer(ctx.controlledPlayer);
       scene.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
 
       ctx.attackingLineY = receiver.y - 28;
@@ -425,6 +555,7 @@ export class RestartController {
       );
       hud.setTackleCount(0, ctx.maxTackles);
 
+      // Final cleanup
       ctx.controlledPlayerRingGraphics.clear();
       ctx.celebrationGraphics.clear();
       ctx.officialsGraphics.clear();
