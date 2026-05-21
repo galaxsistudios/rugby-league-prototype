@@ -95,6 +95,9 @@ export class KickController {
   updateFlow(): void {
     this.updateKickChasePlayers();
 
+    // Keep the ball airborne until landing logic resolves.
+    if (this.ctx.isKickInFlight) return;
+
     const touching = this.getTouchingPlayerWithBall();
     if (!touching) return;
 
@@ -110,10 +113,32 @@ export class KickController {
     if (!this.ctx.isKickCharging) this.ctx.kickAimGraphics.clear();
   }
 
+  armControlledKickoff(): void {
+    const { ctx } = this;
+    ctx.isKickoffSetPiece = true;
+    ctx.isKickCharging = true;
+    ctx.kickType = "punt";
+    ctx.kickOwnerTeamId = ctx.attackingTeamId;
+    ctx.kickAimSideMeters = 0;
+    ctx.kickAimForwardMeters = 52;
+    ctx.kickStartY = ctx.controlledPlayer.y;
+    this.hud.setStatus("Kickoff: A/D to aim, press CTRL to kick.");
+    this.drawKickAimArrow();
+  }
+
   // ─── Charge ──────────────────────────────────────────────────────────────────
 
   private beginKickCharge(kickType: "punt" | "bomb" | "chip"): void {
     const { ctx } = this;
+
+    if (ctx.isKickoffSetPiece) {
+      if (!ctx.isKickCharging) return;
+      this.updateKickAim();
+      if (Phaser.Input.Keyboard.JustDown(this.puntKey)) {
+        this.releaseKick();
+      }
+      return;
+    }
     ctx.isKickCharging = true;
     ctx.kickType = kickType;
     ctx.kickOwnerTeamId = ctx.attackingTeamId;
@@ -166,6 +191,7 @@ export class KickController {
     ctx.kickAimGraphics.clear();
     ctx.isKickInFlight = true;
     ctx.kickBouncedOut = false;
+    ctx.kickGroundedBeforeClaim = false;
     ctx.kickContestPlayers = [];
 
     const kicker = ctx.getBallCarrier() ?? ctx.controlledPlayer;
@@ -182,15 +208,17 @@ export class KickController {
     // If player is moving, kick in that direction
     // Otherwise, kick toward opponent try line
     let kickDirectionY = fwdDir;
-    const playerVelocity = kicker.body?.velocity;
-    if (playerVelocity) {
-      const velocityY = playerVelocity.y as number;
-      if (Math.abs(velocityY) > 20) {
-        // Player is moving significantly, use their movement direction
-        kickDirectionY = velocityY > 0 ? 1 : -1;
-        console.log(`[KICK] Using player movement direction: ${kickDirectionY > 0 ? 'down' : 'up'}`);
-      } else {
-        console.log(`[KICK] Using attack direction: ${ctx.attackDirection} (${kickDirectionY > 0 ? 'down' : 'up'})`);
+    if (!ctx.isKickoffSetPiece) {
+      const playerVelocity = kicker.body?.velocity;
+      if (playerVelocity) {
+        const velocityY = playerVelocity.y as number;
+        if (Math.abs(velocityY) > 20) {
+          // Player is moving significantly, use their movement direction.
+          kickDirectionY = velocityY > 0 ? 1 : -1;
+          console.log(`[KICK] Using player movement direction: ${kickDirectionY > 0 ? 'down' : 'up'}`);
+        } else {
+          console.log(`[KICK] Using attack direction: ${ctx.attackDirection} (${kickDirectionY > 0 ? 'down' : 'up'})`);
+        }
       }
     }
     
@@ -223,6 +251,7 @@ export class KickController {
 
     // Release ball from carrier and set initial kick position
     ctx.ball.setCarrier(null);
+    this.scene.cameras.main.startFollow(ctx.ball, true, 0.2, 0.2);
     
     // Kill any existing tweens on the ball
     this.scene.tweens.killTweensOf(ctx.ball);
@@ -269,65 +298,73 @@ export class KickController {
       this.hud.setStatus("Chip kick...");
     }
 
-    this.scene.tweens.add({
-      targets: ctx.ball,
-      x: ctx.kickTargetX,
-      y: ctx.kickTargetY,
+    const arcHeightPx = Phaser.Math.Clamp(dist * arcMultiplier, 26, 170);
+
+    this.scene.tweens.addCounter({
+      from: 0,
+      to: 1,
       duration,
       ease: "Sine.Out",
       onStart: () => {
         console.log(`[KICK] Tween started! Ball at (${Math.round(ctx.ball.x)}, ${Math.round(ctx.ball.y)})`);
       },
       onUpdate: (tween) => {
-        const progress = tween.progress;
-        
-        // Debug: log position every 25% of flight
-        if (progress > 0 && progress < 0.01) {
-          console.log(`[KICK] Tween 0%: Ball at (${Math.round(ctx.ball.x)}, ${Math.round(ctx.ball.y)})`);
-        }
-        if (progress > 0.24 && progress < 0.26) {
-          console.log(`[KICK] Tween 25%: Ball at (${Math.round(ctx.ball.x)}, ${Math.round(ctx.ball.y)})`);
-        }
-        if (progress > 0.49 && progress < 0.51) {
-          console.log(`[KICK] Tween 50%: Ball at (${Math.round(ctx.ball.x)}, ${Math.round(ctx.ball.y)})`);
-        }
-        if (progress > 0.74 && progress < 0.76) {
-          console.log(`[KICK] Tween 75%: Ball at (${Math.round(ctx.ball.x)}, ${Math.round(ctx.ball.y)})`);
-        }
-        
+        const progress = Number(tween.getValue());
+        const baseX = Phaser.Math.Linear(kickStartX, ctx.kickTargetX, progress);
+        const baseY = Phaser.Math.Linear(kickStartY, ctx.kickTargetY, progress);
+        const heightProgress = Math.sin(progress * Math.PI);
+        const arcOffset = heightProgress * arcHeightPx;
+
+        // Move ball along flight path toward the landing spot.
+        ctx.ball.setPosition(baseX, baseY - arcOffset);
+
         const rotationSpeed = 480;
         ctx.ball.setAngle(progress * rotationSpeed);
-        
-        const heightProgress = Math.sin(progress * Math.PI);
+
         const scaleMultiplier = 1 + (heightProgress * arcMultiplier);
         ctx.ball.setScale(scaleMultiplier);
-        
+
         // Check for bounce (when ball is at ~70% through flight for punt)
         if (ctx.kickType === "punt" && progress > 0.7 && progress < 0.71 && !ctx.kickBouncedOut) {
-          ctx.kickLastBounceY = Phaser.Math.Linear(ctx.ball.y, ctx.kickTargetY, 0.85);
+          ctx.kickLastBounceY = Phaser.Math.Linear(kickStartY, ctx.kickTargetY, 0.85);
         }
       },
       onComplete: () => {
         ctx.ball.setAngle(0);
         ctx.ball.setScale(1);
-        ctx.isKickInFlight = false;
         ctx.ball.setPosition(ctx.kickTargetX, ctx.kickTargetY);
         
         console.log(`[KICK] Kick complete at (${Math.round(ctx.kickTargetX)}, ${Math.round(ctx.kickTargetY)})`);
         
-        // Check if out of bounds
         if (this.isKickOutOfField()) {
-          ctx.kickBouncedOut = true; // Bounced before going out for punt
+          ctx.isKickInFlight = false;
+          ctx.kickBouncedOut = true;
           this.resolveKickTouchOut();
+          return;
+        }
+
+        if (this.isOverDeadBallLine()) {
+          this.resolveKickDeadBall();
           return;
         }
         
         // Handle landing based on kick type
         if (ctx.kickType === "bomb") {
+          ctx.isKickInFlight = false;
           this.resolveBombContest();
         } else {
-          ctx.isKickLoose = true;
-          this.hud.setStatus("Kick chase.");
+          this.animateKickGroundBounce(() => {
+            ctx.isKickInFlight = false;
+            ctx.kickGroundedBeforeClaim = true;
+            if (this.isBallBeyondDeadBallLineNow()) {
+              ctx.kickTargetX = ctx.ball.x;
+              ctx.kickTargetY = ctx.ball.y;
+              this.resolveKickDeadBall();
+              return;
+            }
+            ctx.isKickLoose = true;
+            this.hud.setStatus("Kick chase.");
+          });
         }
       },
     });
@@ -444,6 +481,7 @@ export class KickController {
 
   private attemptCatch(player: Player, sameTeam: boolean): void {
     const { ctx } = this;
+    ctx.isKickoffSetPiece = false;
     ctx.isKickLoose = false;
     ctx.isKickInFlight = false;
 
@@ -466,13 +504,20 @@ export class KickController {
       const receivingTeam = sameTeam ? ctx.defenders : ctx.attackers;
       const nearest = getClosestPlayerByHorizontalDistance(receivingTeam, player.x);
       this.tackle.triggerTurnover(nearest);
+      this.scene.cameras.main.startFollow(nearest, true, 0.16, 0.16);
       return;
     }
 
     // Successful catch
     if (!sameTeam) {
+      if (this.isCleanCatchInDefendersInGoal(player)) {
+        this.handleInGoalCleanCatch20mRestart(player);
+        return;
+      }
+
       this.tackle.triggerTurnover(player);
       ctx.ball.setPosition(player.x, player.y - 28);
+      this.scene.cameras.main.startFollow(player, true, 0.16, 0.16);
       this.hud.setStatus("Kick caught by defence.");
       return;
     }
@@ -484,6 +529,7 @@ export class KickController {
     ctx.ball.setCarrier(ctx.controlledPlayer);
     ctx.ball.updateFollow();
     this.scene.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+    ctx.lineReformUntil = this.scene.time.now + 2200;
     this.hud.setStatus("Kick caught - tackle count continues.");
   }
 
@@ -499,9 +545,12 @@ export class KickController {
     });
 
     if (ctx.kickContestPlayers.length === 0) {
-      // No one there, ball is loose
-      ctx.isKickLoose = true;
-      this.hud.setStatus("Bomb lands - no contest!");
+      // No one there, let it bounce before becoming a loose ball.
+      this.animateKickGroundBounce(() => {
+        ctx.kickGroundedBeforeClaim = true;
+        ctx.isKickLoose = true;
+        this.hud.setStatus("Bomb lands - no contest!");
+      });
       return;
     }
 
@@ -521,8 +570,11 @@ export class KickController {
     }
 
     if (!bestPlayer) {
-      ctx.isKickLoose = true;
-      this.hud.setStatus("Bomb spilled!");
+      this.animateKickGroundBounce(() => {
+        ctx.kickGroundedBeforeClaim = true;
+        ctx.isKickLoose = true;
+        this.hud.setStatus("Bomb spilled!");
+      });
       return;
     }
 
@@ -534,25 +586,35 @@ export class KickController {
     if (Math.random() > contestCatchChance) {
       this.hud.setStatus("Knock-on in contest! Scrum.");
       ctx.ball.setPosition(bestPlayer.x, bestPlayer.y + 20);
+      ctx.kickGroundedBeforeClaim = true;
       // Award scrum to other team
       const receivingTeam = wonByAttacker ? ctx.defenders : ctx.attackers;
       const nearest = getClosestPlayerByHorizontalDistance(receivingTeam, bestPlayer.x);
       this.tackle.triggerTurnover(nearest);
+      this.scene.cameras.main.startFollow(nearest, true, 0.16, 0.16);
       return;
     }
 
     // Successful contest catch
     if (!wonByAttacker) {
+      ctx.isKickoffSetPiece = false;
+      if (this.isCleanCatchInDefendersInGoal(bestPlayer)) {
+        this.handleInGoalCleanCatch20mRestart(bestPlayer);
+        return;
+      }
       this.tackle.triggerTurnover(bestPlayer);
       ctx.ball.setPosition(bestPlayer.x, bestPlayer.y - 28);
+      this.scene.cameras.main.startFollow(bestPlayer, true, 0.16, 0.16);
       this.hud.setStatus("Defence wins bomb contest!");
     } else {
+      ctx.isKickoffSetPiece = false;
       ctx.controlledPlayer = bestPlayer;
       ctx.controlledPlayer.setScale(1.12);
       ctx.movement.setControlledPlayer(ctx.controlledPlayer);
       ctx.ball.setCarrier(ctx.controlledPlayer);
       ctx.ball.updateFollow();
       this.scene.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+      ctx.lineReformUntil = this.scene.time.now + 2200;
       this.hud.setStatus("Attack wins bomb - tackle count continues!");
     }
   }
@@ -579,11 +641,10 @@ export class KickController {
     ctx.ball.setCarrier(null);
 
     if (!retainPossession) {
-      ctx.attackingTeamId = ctx.attackingTeamId === "home" ? "away" : "home";
-      ctx.attackDirection = ctx.attackDirection === "north" ? "south" : "north";
+      const nextAttacker = ctx.attackingTeamId === "home" ? "away" : "home";
+      ctx.setAttackingTeam(nextAttacker);
     }
 
-    ctx.syncTeamRoles();
     this.restart.resetSetState();
 
     const startX = ctx.pitch.fieldRect.x + 70;
@@ -647,8 +708,9 @@ export class KickController {
       ctx.pitch.fieldRect.x + 20,
       ctx.pitch.fieldRect.right - 20,
     );
+    const kickoffDirectionY = ctx.attackDirection === "north" ? -1 : 1;
     const endY = Phaser.Math.Clamp(
-      startY + ctx.pitch.metersToPixels(ctx.kickAimForwardMeters) * arrowDirectionY,
+      startY + ctx.pitch.metersToPixels(ctx.kickAimForwardMeters) * (ctx.isKickoffSetPiece ? kickoffDirectionY : arrowDirectionY),
       ctx.pitch.topTryLineY + 18,
       ctx.pitch.bottomTryLineY - 18,
     );
@@ -674,6 +736,325 @@ export class KickController {
       this.ctx.kickTargetX <= this.ctx.pitch.fieldRect.x ||
       this.ctx.kickTargetX >= this.ctx.pitch.fieldRect.right
     );
+  }
+
+  private isOverDeadBallLine(): boolean {
+    const { ctx } = this;
+    return (
+      ctx.kickTargetY <= ctx.pitch.fieldRect.y ||
+      ctx.kickTargetY >= ctx.pitch.fieldRect.bottom
+    );
+  }
+
+  private isBallBeyondDeadBallLineNow(): boolean {
+    return (
+      this.ctx.ball.y <= this.ctx.pitch.fieldRect.y ||
+      this.ctx.ball.y >= this.ctx.pitch.fieldRect.bottom
+    );
+  }
+
+  private isCleanCatchInDefendersInGoal(player: Player): boolean {
+    const { ctx } = this;
+    if (ctx.kickGroundedBeforeClaim) return false;
+
+    const inTop = Phaser.Geom.Rectangle.Contains(ctx.pitch.topTryZone, player.x, player.y);
+    const inBottom = Phaser.Geom.Rectangle.Contains(ctx.pitch.bottomTryZone, player.x, player.y);
+    const defendersOwnGoalIsTop = ctx.attackDirection === "north";
+    return defendersOwnGoalIsTop ? inTop : inBottom;
+  }
+
+  private handleInGoalCleanCatch20mRestart(receiver: Player): void {
+    const { ctx, hud } = this;
+
+    this.tackle.triggerTurnover(receiver);
+
+    ctx.setTackleBonus = 1;
+    const setLimit = ctx.maxTackles + ctx.setTackleBonus;
+    const restartY = this.getTwentyMeterRestartY();
+    const startX = ctx.pitch.fieldRect.x + 70;
+    const endX = ctx.pitch.fieldRect.right - 70;
+
+    ctx.attackers.forEach((a, i) => {
+      a.setPosition(Phaser.Math.Linear(startX, endX, i / 12), restartY);
+      a.setScale(1);
+      a.haltHorizontal();
+      a.haltVertical();
+    });
+
+    ctx.defenders.forEach((d, i) => {
+      d.setPosition(Phaser.Math.Linear(startX, endX, i / 12), restartY);
+      d.setScale(1);
+      d.haltHorizontal();
+      d.haltVertical();
+    });
+
+    const carrier = getClosestPlayerByHorizontalDistance(ctx.attackers, receiver.x);
+    ctx.ball.setCarrier(carrier);
+    ctx.ball.setPosition(carrier.x, carrier.y - 28);
+    ctx.ball.updateFollow();
+
+    ctx.syncControlledPlayerToHomeTeam(this.scene.cameras.main);
+    ctx.attackingLineY = carrier.y - 28;
+    ctx.previousCarrierY = carrier.y;
+    this.line.reseedDefensiveShift();
+    this.line.positionDefenders();
+
+    hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
+    hud.setTackleCount(0, setLimit);
+    hud.setStatus(`20m restart. ${setLimit}-tackle set.`);
+  }
+
+  private getTwentyMeterRestartY(): number {
+    const { ctx } = this;
+    const twentyMeters = ctx.pitch.metersToPixels(20);
+    return ctx.attackDirection === "north"
+      ? ctx.pitch.bottomTryLineY - twentyMeters
+      : ctx.pitch.topTryLineY + twentyMeters;
+  }
+
+  private resolveKickDeadBall(): void {
+    const { ctx } = this;
+
+    ctx.isKickInFlight = false;
+    ctx.isKickLoose = false;
+    ctx.isTurnoverPause = true;
+    ctx.ball.setCarrier(null);
+    ctx.ball.setPosition(ctx.kickTargetX, ctx.kickTargetY);
+
+    if (ctx.isKickoffSetPiece) {
+      const bouncedDead = ctx.kickGroundedBeforeClaim;
+      ctx.isKickoffSetPiece = false;
+      if (bouncedDead) {
+        this.restartAtHalfway(true, "Kickoff bounced dead. Kicking team gets it back at halfway.");
+      } else {
+        this.restartAtHalfway(false, "Kickoff on the full dead. Receiving team restarts at halfway.");
+      }
+      return;
+    }
+
+    const attackingDeadBall = ctx.attackDirection === "north"
+      ? ctx.kickTargetY <= ctx.pitch.fieldRect.y
+      : ctx.kickTargetY >= ctx.pitch.fieldRect.bottom;
+
+    const receivingTeam = ctx.defenders;
+
+    if (attackingDeadBall) {
+      this.hud.setStatus("Ball dead. Fetching for 20m restart...");
+      this.animateDeadBallRollAndRetrieval(receivingTeam, () => {
+        this.hud.setStatus("Dead ball off kick. 20m restart (7 tackles).");
+        this.restartAtTwentyWithBonus();
+      });
+      return;
+    }
+
+    this.hud.setStatus("Ball dead. Fetching for dropout...");
+    this.animateDeadBallRollAndRetrieval(receivingTeam, () => {
+      this.hud.setStatus("Dead ball. Goal-line dropout.");
+      this.restart.startGoalLineDropOut();
+    });
+  }
+
+  private animateKickGroundBounce(onComplete: () => void): void {
+    const { ctx, scene } = this;
+    const startX = ctx.ball.x;
+    const startY = ctx.ball.y;
+    const yDrift = ctx.attackDirection === "north"
+      ? -ctx.pitch.metersToPixels(2.2)
+      : ctx.pitch.metersToPixels(2.2);
+
+    scene.tweens.add({
+      targets: ctx.ball,
+      x: startX + yDrift * 0.55,
+      y: startY - 18,
+      duration: 110,
+      ease: "Quad.Out",
+      onUpdate: (tween) => {
+        ctx.ball.setAngle(Number(tween.progress) * 140);
+      },
+      onComplete: () => {
+        scene.tweens.add({
+          targets: ctx.ball,
+          x: startX + yDrift,
+          y: startY + 1,
+          duration: 130,
+          ease: "Quad.In",
+          onUpdate: (tween) => {
+            ctx.ball.setAngle(140 + Number(tween.progress) * 140);
+          },
+          onComplete: () => {
+            ctx.kickLastBounceY = ctx.ball.y;
+            scene.tweens.add({
+              targets: ctx.ball,
+              x: startX + yDrift * 1.45,
+              y: startY - 8,
+              duration: 90,
+              ease: "Quad.Out",
+              onUpdate: (tween) => {
+                ctx.ball.setAngle(280 + Number(tween.progress) * 120);
+              },
+              onComplete: () => {
+                scene.tweens.add({
+                  targets: ctx.ball,
+                  x: startX + yDrift * 1.9,
+                  y: startY,
+                  duration: 100,
+                  ease: "Quad.In",
+                  onComplete: () => {
+                    ctx.ball.setAngle(0);
+                    onComplete();
+                  },
+                });
+              },
+            });
+          },
+        });
+      },
+    });
+  }
+
+  private animateDeadBallRollAndRetrieval(
+    receivingTeam: Player[],
+    onComplete: () => void,
+  ): void {
+    const { ctx, scene } = this;
+    const deadAtTop = ctx.kickTargetY <= ctx.pitch.fieldRect.y;
+    const offscreenY = deadAtTop
+      ? ctx.pitch.fieldRect.y - 85
+      : ctx.pitch.fieldRect.bottom + 85;
+    const rollX = Phaser.Math.Clamp(
+      ctx.ball.x + Phaser.Math.FloatBetween(-26, 26),
+      ctx.pitch.fieldRect.x + 24,
+      ctx.pitch.fieldRect.right - 24,
+    );
+
+    const fetcher = receivingTeam.reduce((closest, p) => {
+      const dClosest = Phaser.Math.Distance.Between(closest.x, closest.y, ctx.ball.x, ctx.ball.y);
+      const dPlayer = Phaser.Math.Distance.Between(p.x, p.y, ctx.ball.x, ctx.ball.y);
+      return dPlayer < dClosest ? p : closest;
+    });
+    const returnX = fetcher.x;
+    const returnY = fetcher.y;
+
+    scene.cameras.main.startFollow(ctx.ball, true, 0.22, 0.22);
+
+    scene.tweens.add({
+      targets: ctx.ball,
+      x: rollX,
+      y: offscreenY,
+      angle: deadAtTop ? -220 : 220,
+      duration: 620,
+      ease: "Sine.In",
+      onComplete: () => {
+        scene.tweens.add({
+          targets: fetcher,
+          x: rollX,
+          y: offscreenY,
+          duration: 520,
+          ease: "Sine.InOut",
+          onComplete: () => {
+            ctx.ball.setVisible(false);
+
+            scene.tweens.add({
+              targets: fetcher,
+              x: returnX,
+              y: returnY,
+              duration: 640,
+              ease: "Sine.InOut",
+              onComplete: () => {
+                ctx.ball.setVisible(true);
+                ctx.ball.setAngle(0);
+                onComplete();
+              },
+            });
+          },
+        });
+      },
+    });
+  }
+
+  private restartAtTwentyWithBonus(): void {
+    const { ctx, hud } = this;
+
+    // Turn possession over to the defending team for a 20m restart.
+    const nextAttacker = ctx.attackingTeamId === "home" ? "away" : "home";
+    ctx.setAttackingTeam(nextAttacker);
+    this.restart.resetSetState();
+
+    ctx.setTackleBonus = 1;
+    const setLimit = ctx.maxTackles + ctx.setTackleBonus;
+    const restartY = this.getTwentyMeterRestartY();
+    const startX = ctx.pitch.fieldRect.x + 70;
+    const endX = ctx.pitch.fieldRect.right - 70;
+
+    ctx.attackers.forEach((a, i) => {
+      a.setPosition(Phaser.Math.Linear(startX, endX, i / 12), restartY);
+      a.setScale(1);
+      a.haltHorizontal();
+      a.haltVertical();
+    });
+    ctx.defenders.forEach((d, i) => {
+      d.setPosition(Phaser.Math.Linear(startX, endX, i / 12), restartY);
+      d.setScale(1);
+      d.haltHorizontal();
+      d.haltVertical();
+    });
+
+    const carrier = getClosestPlayerByHorizontalDistance(ctx.attackers, ctx.pitch.fieldRect.centerX);
+    ctx.ball.setCarrier(carrier);
+    ctx.ball.setPosition(carrier.x, carrier.y - 28);
+    ctx.ball.updateFollow();
+
+    ctx.syncControlledPlayerToHomeTeam(this.scene.cameras.main);
+    ctx.attackingLineY = carrier.y - 28;
+    ctx.previousCarrierY = carrier.y;
+    this.line.reseedDefensiveShift();
+    this.line.positionDefenders();
+
+    hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
+    hud.setTackleCount(0, setLimit);
+  }
+
+  private restartAtHalfway(retainPossession: boolean, status: string): void {
+    const { ctx, hud } = this;
+
+    if (!retainPossession) {
+      const nextAttacker = ctx.attackingTeamId === "home" ? "away" : "home";
+      ctx.setAttackingTeam(nextAttacker);
+    }
+
+    this.restart.resetSetState();
+
+    const halfwayY = ctx.pitch.getLineYFromTopTryLine(50);
+    const startX = ctx.pitch.fieldRect.x + 70;
+    const endX = ctx.pitch.fieldRect.right - 70;
+
+    ctx.attackers.forEach((a, i) => {
+      a.setPosition(Phaser.Math.Linear(startX, endX, i / 12), halfwayY);
+      a.setScale(1);
+      a.haltHorizontal();
+      a.haltVertical();
+    });
+    ctx.defenders.forEach((d, i) => {
+      d.setPosition(Phaser.Math.Linear(startX, endX, i / 12), halfwayY);
+      d.setScale(1);
+      d.haltHorizontal();
+      d.haltVertical();
+    });
+
+    const carrier = getClosestPlayerByHorizontalDistance(ctx.attackers, ctx.pitch.fieldRect.centerX);
+    ctx.ball.setCarrier(carrier);
+    ctx.ball.setPosition(carrier.x, carrier.y - 28);
+    ctx.ball.updateFollow();
+    ctx.syncControlledPlayerToHomeTeam(this.scene.cameras.main);
+
+    ctx.attackingLineY = carrier.y - 28;
+    ctx.previousCarrierY = carrier.y;
+    this.line.reseedDefensiveShift();
+    this.line.positionDefenders();
+
+    hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
+    hud.setStatus(status);
+    hud.setTackleCount(0, ctx.maxTackles);
   }
 
   private isAheadOfKicker(player: Player): boolean {

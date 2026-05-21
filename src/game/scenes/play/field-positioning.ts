@@ -10,22 +10,15 @@ export const getLaneX = (pitch: Pitch, slotIndex: number): number => {
 };
 
 export const getKickoffCarrierY = (pitch: Pitch, attackDirection: AttackDirection): number => {
-  // Flipped kickoff side: spawn on the opposite end from previous behavior.
-  return pitch.getReceivingKickoffY(attackDirection === "south");
+  const halfwayMeters = 50;
+  const receiveOffsetMeters = 10;
+  return attackDirection === "north"
+    ? pitch.getLineYFromTopTryLine(halfwayMeters - receiveOffsetMeters)
+    : pitch.getLineYFromTopTryLine(halfwayMeters + receiveOffsetMeters);
 };
 
 export const getKickingTeamKickoffY = (pitch: Pitch, attackDirection: AttackDirection): number => {
-  const halfwayY = pitch.getLineYFromTopTryLine(50);
-  const behindHalfwayMeters = 2.5;
-  const behindHalfwayPixels = pitch.metersToPixels(behindHalfwayMeters);
-  const receivingY = getKickoffCarrierY(pitch, attackDirection);
-  const kickersStartBelowHalfway = receivingY < halfwayY;
-
-  return Phaser.Math.Clamp(
-    halfwayY + (kickersStartBelowHalfway ? behindHalfwayPixels : -behindHalfwayPixels),
-    pitch.topTryLineY + 20,
-    pitch.bottomTryLineY - 20,
-  );
+  return pitch.getLineYFromTopTryLine(50);
 };
 
 export const getDistanceFromOwnTryLine = (

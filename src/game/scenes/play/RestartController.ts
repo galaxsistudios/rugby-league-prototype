@@ -8,6 +8,7 @@ import { HUD } from "../../ui/HUD";
 import { getKickoffCarrierY, getKickingTeamKickoffY } from "./field-positioning";
 import { LineController } from "./LineController";
 import { PlayContext } from "./PlayContext";
+import { getClosestPlayerByHorizontalDistance } from "./player-utils";
 
 /**
  * Handles try scoring, all post-score transitions, kickoff formation setup,
@@ -30,18 +31,145 @@ export class RestartController {
   resetSetState(): void {
     const { ctx, hud } = this;
     ctx.currentTackleCount = 0;
+    ctx.setTackleBonus = 0;
     ctx.tackleBustsThisSet = 0;
     ctx.consecutiveTackleBusts = 0;
     hud.setTackleCount(ctx.currentTackleCount, ctx.maxTackles);
     ctx.isInPlayTheBall = false;
     ctx.defendersCanAdvance = true;
+    ctx.markerDefenders = [];
+    ctx.offsideDefendersAtRuck.clear();
     ctx.isTurnoverPause = false;
     ctx.isForwardPassPause = false;
+    ctx.isDiving = false;
     ctx.sixAgainAwardedThisRuck = false;
+    ctx.offsideDefenders.clear();
+    ctx.offsideLineY = null;
     ctx.officialsLineOverrideY = null;
     ctx.officialsRunLerp = 0.16;
+    ctx.tackleCountPopupTween?.stop();
+    ctx.tackleCountPopup?.destroy();
+    ctx.tackleCountPopup = null;
+    ctx.tackleCountPopupTween = null;
+    ctx.lineReformUntil = 0;
+    ctx.firstReceiverPlayer = null;
+    ctx.firstReceiverTargetX = null;
+    ctx.firstReceiverTargetY = null;
     this.line.clearOffsideRings();
     this.line.reseedDefensiveShift();
+  }
+
+  startGoalLineDropOut(): void {
+    const { ctx, hud, scene, stateManager } = this;
+    if (ctx.isTryCelebration) return;
+
+    const kickingTeamIsHome = ctx.attackingTeamId === "home";
+    const kickingPlayers = kickingTeamIsHome ? ctx.homePlayers : ctx.awayPlayers;
+    const receivingPlayers = kickingTeamIsHome ? ctx.awayPlayers : ctx.homePlayers;
+
+    const startX = ctx.pitch.fieldRect.x + 70;
+    const endX = ctx.pitch.fieldRect.right - 70;
+    const kickNorth = ctx.attackDirection === "north";
+    const goalLineY = kickNorth ? ctx.pitch.bottomTryLineY : ctx.pitch.topTryLineY;
+    const inGoalOffset = ctx.pitch.metersToPixels(4);
+    const kickLineY = kickNorth ? goalLineY + inGoalOffset : goalLineY - inGoalOffset;
+    const receivingLineY = Phaser.Math.Clamp(
+      goalLineY + (kickNorth ? -ctx.pitch.metersToPixels(28) : ctx.pitch.metersToPixels(28)),
+      ctx.pitch.topTryLineY + 24,
+      ctx.pitch.bottomTryLineY - 24,
+    );
+
+    ctx.isInPlayTheBall = false;
+    ctx.isTurnoverPause = true;
+    ctx.isKickCharging = false;
+    ctx.isKickInFlight = false;
+    ctx.isKickLoose = false;
+    ctx.isBallInFlight = false;
+    ctx.kickAimGraphics.clear();
+
+    [...ctx.homePlayers, ...ctx.awayPlayers].forEach((p) => {
+      p.haltHorizontal();
+      p.haltVertical();
+      p.setScale(1);
+    });
+
+    kickingPlayers.forEach((p, i) => {
+      p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), kickLineY);
+    });
+    receivingPlayers.forEach((p, i) => {
+      p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), receivingLineY);
+    });
+
+    const kicker = kickingPlayers[6] ?? kickingPlayers[0];
+    const receiverSlotPool = [2, 4, 6, 7, 8, 9, 10];
+    const receiverSlot = receiverSlotPool[Math.floor(Math.random() * receiverSlotPool.length)];
+    const receiver = receivingPlayers[receiverSlot] ?? receivingPlayers[6];
+
+    ctx.ball.setCarrier(null);
+    ctx.ball.setVisible(true);
+    ctx.ball.setAngle(0);
+    ctx.ball.setScale(1);
+    ctx.ball.setPosition(kicker.x, kicker.y - 18);
+
+    hud.setStatus("Goal-line dropout...");
+    scene.cameras.main.startFollow(ctx.ball, true, 0.16, 0.16);
+
+    scene.time.delayedCall(260, () => {
+      ctx.isKickInFlight = true;
+
+      const fromX = kicker.x;
+      const fromY = kicker.y - 18;
+      const toX = receiver.x;
+      const toY = receiver.y - 28;
+      const distance = Phaser.Math.Distance.Between(fromX, fromY, toX, toY);
+      const arcHeight = Phaser.Math.Clamp(distance * 0.24, 70, 170);
+
+      scene.tweens.addCounter({
+        from: 0,
+        to: 1,
+        duration: Phaser.Math.Clamp(900 + distance * 1.1, 1000, 1500),
+        ease: "Sine.InOut",
+        onUpdate: (tween) => {
+          const t = Number(tween.getValue());
+          const baseX = Phaser.Math.Linear(fromX, toX, t);
+          const baseY = Phaser.Math.Linear(fromY, toY, t);
+          const lift = Math.sin(t * Math.PI) * arcHeight;
+          ctx.ball.setPosition(baseX, baseY - lift);
+          ctx.ball.setAngle(t * 500);
+          ctx.ball.setScale(1 + Math.sin(t * Math.PI) * 0.28);
+        },
+        onComplete: () => {
+          ctx.isKickInFlight = false;
+          ctx.isKickLoose = false;
+          ctx.ball.setAngle(0);
+          ctx.ball.setScale(1);
+          ctx.ball.setPosition(toX, toY);
+          ctx.ball.setCarrier(receiver);
+
+          const nextAttacker: "home" | "away" = kickingTeamIsHome ? "away" : "home";
+          ctx.setAttackingTeam(nextAttacker);
+
+          this.resetSetState();
+
+          const carrier = getClosestPlayerByHorizontalDistance(ctx.attackers, receiver.x);
+          ctx.ball.setCarrier(carrier);
+          ctx.ball.updateFollow();
+          ctx.syncControlledPlayerToHomeTeam(scene.cameras.main);
+
+          ctx.attackingLineY = carrier.y - 28;
+          ctx.previousCarrierY = carrier.y;
+          this.line.reseedDefensiveShift();
+          this.line.positionDefenders();
+
+          hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
+          hud.setStatus("Dropout received. Play on.");
+          hud.setTackleCount(0, ctx.maxTackles);
+
+          ctx.isTurnoverPause = false;
+          stateManager.kickoff();
+        },
+      });
+    });
   }
 
   // ─── Try scoring — full animated sequence ────────────────────────────────────
@@ -550,8 +678,7 @@ export class RestartController {
                 
                 // Give ball to receiver
                 ctx.ball.setCarrier(receiver);
-                ctx.attackingTeamId = receivingPlayers === ctx.homePlayers ? "home" : "away";
-                ctx.syncTeamRoles();
+                ctx.setAttackingTeam(receivingPlayers === ctx.homePlayers ? "home" : "away");
                 
                 // Set controlled player
                 if (ctx.homePlayers.includes(receiver)) {
@@ -852,8 +979,7 @@ export class RestartController {
       ctx.ball.updateFollow();
 
       // Set attacking team to the receiving team
-      ctx.attackingTeamId = receivingPlayers === ctx.homePlayers ? "home" : "away";
-      ctx.syncTeamRoles();
+      ctx.setAttackingTeam(receivingPlayers === ctx.homePlayers ? "home" : "away");
 
       // Sync controlled player and camera
       if (ctx.homePlayers.includes(receiver)) {

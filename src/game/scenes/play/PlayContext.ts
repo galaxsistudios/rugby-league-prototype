@@ -29,6 +29,8 @@ export class PlayContext {
   officialsGraphics!: Phaser.GameObjects.Graphics;
   kickAimGraphics!: Phaser.GameObjects.Graphics;
   controlledPlayerRingGraphics!: Phaser.GameObjects.Graphics;
+  debugLinesGraphics: Phaser.GameObjects.Graphics | null = null;
+  debugEnabled = false;
 
   // ─── Slot / rule constants ───────────────────────────────────────────────────
   // Slot layout (left to right): Wings → Centers → Halves → Second Rows → Props → middle,
@@ -55,18 +57,29 @@ export class PlayContext {
   detachedFromLine = new Set<Player>();
   dragLineWithCarrier = false;
   previousCarrierY = 0;
+  lineReformUntil = 0;
+  firstReceiverPlayer: Player | null = null;
+  firstReceiverTargetX: number | null = null;
+  firstReceiverTargetY: number | null = null;
 
   // ─── Match state ─────────────────────────────────────────────────────────────
   attackingTeamId: "home" | "away" = "home";
   attackDirection: "north" | "south" = "north";
+  readonly homeAttackDirection: "north" | "south" = "north";
+  readonly awayAttackDirection: "north" | "south" = "south";
 
   // ─── Tackle / ruck state ─────────────────────────────────────────────────────
   currentTackleCount = 0;
+  setTackleBonus = 0;
   tackleBustsThisSet = 0;
   consecutiveTackleBusts = 0;
   isInPlayTheBall = false;
   defendersCanAdvance = true;
   playTheBallMarkY = 0;
+  markerDefenders: Player[] = [];
+  offsideDefendersAtRuck = new Set<Player>();
+  offsideDefenders = new Set<Player>();
+  offsideLineY: number | null = null;
   lastTackleAt = 0;
   sixAgainAwardedThisRuck = false;
 
@@ -81,6 +94,8 @@ export class PlayContext {
   refereeDotY: number | null = null;
   officialsLineOverrideY: number | null = null;
   officialsRunLerp = 0.16;
+  tackleCountPopup: Phaser.GameObjects.Text | null = null;
+  tackleCountPopupTween: Phaser.Tweens.Tween | null = null;
 
   // ─── Celebration / scoring transition ────────────────────────────────────────
   isTryCelebration = false;
@@ -92,6 +107,9 @@ export class PlayContext {
   isScrumPause = false;
   scrumWinnerIsAttacker = true;
   isBallInFlight = false;
+  isDiving = false;
+  isPrematchSequence = false;
+  isKickoffSetPiece = false;
 
   // ─── Kick state ──────────────────────────────────────────────────────────────
   isKickCharging = false;
@@ -110,6 +128,7 @@ export class PlayContext {
   kickAimSideMeters = 0;
   kickTargetX = 0;
   kickTargetY = 0;
+  kickGroundedBeforeClaim = false;
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -121,6 +140,12 @@ export class PlayContext {
   syncTeamRoles(): void {
     this.attackers = this.attackingTeamId === "home" ? this.homePlayers : this.awayPlayers;
     this.defenders = this.attackingTeamId === "home" ? this.awayPlayers : this.homePlayers;
+  }
+
+  setAttackingTeam(teamId: "home" | "away"): void {
+    this.attackingTeamId = teamId;
+    this.attackDirection = teamId === "home" ? this.homeAttackDirection : this.awayAttackDirection;
+    this.syncTeamRoles();
   }
 
   getControlledTeamPlayers(): Player[] {

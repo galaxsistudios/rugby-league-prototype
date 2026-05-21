@@ -40,14 +40,30 @@ export class TackleController {
     const tackler = ctx.defenders.find((d) => this.isDefenderTouchingCarrier(d));
     if (!tackler) return;
 
-    if (this.line.isDefenderOffside(tackler) && !ctx.sixAgainAwardedThisRuck) {
-      ctx.sixAgainAwardedThisRuck = true;
-      ctx.currentTackleCount = 0;
-      this.hud.setTackleCount(ctx.currentTackleCount, ctx.maxTackles);
-      this.hud.setStatus("Offside tackle. Six Again (10m).");
+    if (this.line.isDefenderOffside(tackler)) {
+      this.applyOffsidePenaltyReset(tackler);
+      return;
     }
 
     this.onTackleMade();
+  }
+
+  private applyOffsidePenaltyReset(_tackler: Player): void {
+    const { ctx, hud } = this;
+    const ballCarrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
+
+    ctx.currentTackleCount = 0;
+    ctx.sixAgainAwardedThisRuck = false;
+    ctx.playTheBallMarkY = ballCarrier.y;
+    ctx.isInPlayTheBall = true;
+    ctx.defendersCanAdvance = false;
+    ballCarrier.haltHorizontal();
+    ballCarrier.haltVertical();
+
+    this.line.captureRuckState();
+    hud.setTackleCount(0, this.getSetTackleLimit());
+    hud.setStatus("Penalty: offside tackle. Line reset.");
+    this.performPlayTheBall();
   }
 
   // ─── Tackle handling ─────────────────────────────────────────────────────────
@@ -57,10 +73,22 @@ export class TackleController {
     ctx.lastTackleAt = this.scene.time.now;
     const ballCarrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
 
-    if (this.tryBreakTackle(ballCarrier)) return;
+    const wasDiving = ctx.isDiving;
+    if (wasDiving) {
+      ctx.isDiving = false;
+      this.scene.tweens.killTweensOf(ballCarrier);
+    }
+
+    if (!wasDiving && this.tryBreakTackle(ballCarrier)) return;
     
     // Check for stamina-powered tackle (shift held + has stamina)
-    if (this.tryPowerThroughTackle(ballCarrier)) return;
+    if (!wasDiving && this.tryPowerThroughTackle(ballCarrier)) return;
+
+    if (this.isCarrierInOwnInGoal(ballCarrier)) {
+      this.hud.setStatus("Held in-goal. Goal-line dropout.");
+      this.restart.startGoalLineDropOut();
+      return;
+    }
 
     ctx.consecutiveTackleBusts = 0;
     ctx.playTheBallMarkY = ballCarrier.y;
@@ -69,16 +97,61 @@ export class TackleController {
     ctx.sixAgainAwardedThisRuck = false;
     ballCarrier.haltHorizontal();
     ballCarrier.haltVertical();
+    this.line.captureRuckState();
 
     ctx.currentTackleCount++;
-    hud.setTackleCount(ctx.currentTackleCount, ctx.maxTackles);
+    const tackleLimit = this.getSetTackleLimit();
+    hud.setTackleCount(ctx.currentTackleCount, tackleLimit);
+    this.showTackleCountPopup(ctx.currentTackleCount);
 
-    if (ctx.currentTackleCount >= ctx.maxTackles) {
+    if (ctx.currentTackleCount >= tackleLimit) {
       this.startFinalTackleTurnoverPause();
       return;
     }
 
     this.performPlayTheBall();
+  }
+
+  private showTackleCountPopup(count: number): void {
+    const { ctx, scene } = this;
+    const carrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
+    const anchorX = ctx.refereeDotX ?? carrier.x;
+    const anchorY = ctx.refereeDotY ?? carrier.y;
+    const isLastTackle = count >= ctx.maxTackles - 1;
+    const popupColor = isLastTackle ? "#ff4f4f" : "#fff4cf";
+
+    ctx.tackleCountPopupTween?.stop();
+    ctx.tackleCountPopup?.destroy();
+
+    const popup = scene.add
+      .text(anchorX, anchorY - 18, `${count}`, {
+        fontFamily: "Verdana",
+        fontSize: "24px",
+        color: popupColor,
+        stroke: "#000000",
+        strokeThickness: 5,
+      })
+      .setOrigin(0.5)
+      .setDepth(2050)
+      .setScale(0.65)
+      .setAlpha(0.95);
+
+    ctx.tackleCountPopup = popup;
+    ctx.tackleCountPopupTween = scene.tweens.add({
+      targets: popup,
+      y: anchorY - 44,
+      alpha: 0,
+      scale: 1.05,
+      duration: 720,
+      ease: "Cubic.Out",
+      onComplete: () => {
+        popup.destroy();
+        if (ctx.tackleCountPopup === popup) {
+          ctx.tackleCountPopup = null;
+          ctx.tackleCountPopupTween = null;
+        }
+      },
+    });
   }
 
   private performPlayTheBall(): void {
@@ -112,6 +185,8 @@ export class TackleController {
     dummy.haltVertical();
     tackled.setScale(1);
 
+    this.configureFifthTackleFirstReceiver(tackled, dummy, dummyY, supportDir);
+
     hud.setStatus(`Tackle ${ctx.currentTackleCount}. Play the ball...`);
 
     this.scene.tweens.add({
@@ -126,9 +201,51 @@ export class TackleController {
         ctx.syncControlledPlayerToHomeTeam(this.scene.cameras.main);
         ctx.defendersCanAdvance = true;
         ctx.isInPlayTheBall = false;
+        line.clearRuckState();
         line.reseedDefensiveShift();
       },
     });
+  }
+
+  private configureFifthTackleFirstReceiver(
+    tackled: Player,
+    dummy: Player,
+    dummyY: number,
+    supportDir: number,
+  ): void {
+    const { ctx } = this;
+    if (ctx.currentTackleCount !== ctx.maxTackles - 1) {
+      ctx.firstReceiverPlayer = null;
+      ctx.firstReceiverTargetX = null;
+      ctx.firstReceiverTargetY = null;
+      return;
+    }
+
+    const halves = ctx.attackers.filter(
+      (a) => a.getRole() === "half" && a !== tackled && a !== dummy,
+    );
+
+    if (halves.length === 0) {
+      ctx.firstReceiverPlayer = null;
+      ctx.firstReceiverTargetX = null;
+      ctx.firstReceiverTargetY = null;
+      return;
+    }
+
+    const firstReceiver = getClosestPlayerByDistance(halves, tackled.x, tackled.y);
+    const horizontalBias = firstReceiver.x < tackled.x ? -1 : 1;
+
+    ctx.firstReceiverPlayer = firstReceiver;
+    ctx.firstReceiverTargetX = Phaser.Math.Clamp(
+      tackled.x + ctx.pitch.metersToPixels(1.5) * horizontalBias,
+      ctx.pitch.fieldRect.x + 24,
+      ctx.pitch.fieldRect.right - 24,
+    );
+    ctx.firstReceiverTargetY = Phaser.Math.Clamp(
+      dummyY + ctx.pitch.metersToPixels(2.6) * supportDir,
+      ctx.pitch.topTryLineY + 20,
+      ctx.pitch.bottomTryLineY - 20,
+    );
   }
 
   // ─── Tackle break ────────────────────────────────────────────────────────────
@@ -217,13 +334,25 @@ export class TackleController {
     });
   }
 
+  private getSetTackleLimit(): number {
+    return this.ctx.maxTackles + this.ctx.setTackleBonus;
+  }
+
+  private isCarrierInOwnInGoal(ballCarrier: Player): boolean {
+    const { ctx } = this;
+    const inTopInGoal = Phaser.Geom.Rectangle.Contains(ctx.pitch.topTryZone, ballCarrier.x, ballCarrier.y);
+    const inBottomInGoal = Phaser.Geom.Rectangle.Contains(ctx.pitch.bottomTryZone, ballCarrier.x, ballCarrier.y);
+
+    // If attacking north, own in-goal is the bottom try zone. If attacking south, own in-goal is top.
+    return ctx.attackDirection === "north" ? inBottomInGoal : inTopInGoal;
+  }
+
   // ─── Turnover ────────────────────────────────────────────────────────────────
 
   triggerTurnover(newCarrier?: Player): void {
     const { ctx, hud, line, restart } = this;
-    ctx.attackingTeamId = ctx.attackingTeamId === "home" ? "away" : "home";
-    ctx.attackDirection = ctx.attackDirection === "north" ? "south" : "north";
-    ctx.syncTeamRoles();
+    const nextAttacker = ctx.attackingTeamId === "home" ? "away" : "home";
+    ctx.setAttackingTeam(nextAttacker);
     restart.resetSetState();
 
     ctx.attackers.forEach((a) => a.setScale(1));
@@ -235,6 +364,7 @@ export class TackleController {
     ctx.ball.setCarrier(carrier);
     ctx.ball.updateFollow();
     ctx.syncControlledPlayerToHomeTeam(this.scene.cameras.main);
+    ctx.lineReformUntil = this.scene.time.now + 2200;
 
     hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
     hud.setStatus("Turnover. New set.");
@@ -307,8 +437,88 @@ export class TackleController {
     layout.attackerTargets.forEach((t) => snap(ctx.attackers[t.slot], t.x, t.y));
     layout.defenderTargets.forEach((t) => snap(ctx.defenders[t.slot], t.x, t.y));
 
-    hud.setStatus("Scrum forming...");
-    this.scene.time.delayedCall(1400, () => this.resolveScrum(clampedX, clampedY));
+    const feeder = this.getScrumFeeder(attackerFeeds, clampedX);
+    hud.setStatus(`Scrum forming... #${feeder.getJerseyNumber()} to feed.`);
+    this.scene.time.delayedCall(900, () => {
+      this.animateScrumFeed(feeder, clampedX, clampedY, () => this.resolveScrum(clampedX, clampedY));
+    });
+  }
+
+  private getScrumFeeder(attackerFeeds: boolean, scrumX: number): Player {
+    const { ctx } = this;
+    const feedingTeam = attackerFeeds ? ctx.attackers : ctx.defenders;
+    const halfSix = feedingTeam[2];
+    const halfSeven = feedingTeam[10];
+
+    if (!halfSix && !halfSeven) return feedingTeam[6] ?? feedingTeam[0];
+    if (!halfSix) return halfSeven;
+    if (!halfSeven) return halfSix;
+
+    const centerX = ctx.pitch.fieldRect.centerX;
+    const sidePreferred = scrumX <= centerX ? halfSix : halfSeven;
+    const sideOther = sidePreferred === halfSix ? halfSeven : halfSix;
+
+    const preferredDist = Phaser.Math.Distance.Between(sidePreferred.x, sidePreferred.y, scrumX, sidePreferred.y);
+    const otherDist = Phaser.Math.Distance.Between(sideOther.x, sideOther.y, scrumX, sideOther.y);
+    return preferredDist <= otherDist + 10 ? sidePreferred : sideOther;
+  }
+
+  private animateScrumFeed(
+    feeder: Player,
+    scrumX: number,
+    scrumY: number,
+    onComplete: () => void,
+  ): void {
+    const { ctx, scene } = this;
+    const feedFromLeft = feeder.x <= scrumX;
+    const feedOffsetX = ctx.pitch.metersToPixels(1.15) * (feedFromLeft ? -1 : 1);
+    const feedX = Phaser.Math.Clamp(
+      scrumX + feedOffsetX,
+      ctx.pitch.fieldRect.x + 24,
+      ctx.pitch.fieldRect.right - 24,
+    );
+    const feedY = Phaser.Math.Clamp(
+      scrumY + ctx.pitch.metersToPixels(0.25),
+      ctx.pitch.topTryLineY + 18,
+      ctx.pitch.bottomTryLineY - 18,
+    );
+
+    feeder.haltHorizontal();
+    feeder.haltVertical();
+    ctx.ball.setCarrier(null);
+    ctx.ball.setVisible(true);
+    ctx.ball.setScale(1);
+    ctx.ball.setAngle(0);
+
+    scene.tweens.add({
+      targets: feeder,
+      x: feedX,
+      y: feedY,
+      duration: 220,
+      ease: "Sine.Out",
+      onComplete: () => {
+        ctx.ball.setPosition(feedX, feedY - 8);
+
+        scene.tweens.addCounter({
+          from: 0,
+          to: 1,
+          duration: 280,
+          ease: "Sine.InOut",
+          onUpdate: (tween) => {
+            const t = Number(tween.getValue());
+            const x = Phaser.Math.Linear(feedX, scrumX, t);
+            const y = Phaser.Math.Linear(feedY - 8, scrumY - 6, t) + Math.sin(t * Math.PI) * 2;
+            ctx.ball.setPosition(x, y);
+            ctx.ball.setAngle(t * 120);
+          },
+          onComplete: () => {
+            ctx.ball.setPosition(scrumX, scrumY - 8);
+            ctx.ball.setAngle(0);
+            onComplete();
+          },
+        });
+      },
+    });
   }
 
   private resolveScrum(scrumX: number, scrumY: number): void {
@@ -316,15 +526,15 @@ export class TackleController {
     ctx.isScrumPause = false;
     restart.resetSetState();
 
+    const feedWinChance = 0.92;
     const attackerWins = ctx.scrumWinnerIsAttacker
-      ? Math.random() < 0.72
-      : Math.random() < 0.28;
+      ? Math.random() < feedWinChance
+      : Math.random() < (1 - feedWinChance);
 
     const giveScrum = (toAttacker: boolean) => {
       if (!toAttacker) {
-        ctx.attackingTeamId = ctx.attackingTeamId === "home" ? "away" : "home";
-        ctx.attackDirection = ctx.attackDirection === "north" ? "south" : "north";
-        ctx.syncTeamRoles();
+        const nextAttacker = ctx.attackingTeamId === "home" ? "away" : "home";
+        ctx.setAttackingTeam(nextAttacker);
         ctx.attackers.forEach((a) => a.setScale(1));
         ctx.defenders.forEach((d) => d.setScale(1));
         hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);

@@ -21,9 +21,18 @@ export class LineController {
   updateAttackLineAndSupportPlayers(): void {
     const { ctx } = this;
     const { pitch } = ctx;
+    this.refreshPersistentOffsideState();
+    this.syncPossessionRolesFromCarrier();
+    const isReforming = this.scene.time.now < ctx.lineReformUntil;
     const supportDirection = ctx.attackDirection === "north" ? 1 : -1;
     const ballCarrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
     const isSetOpeningRun = ctx.currentTackleCount === 0 && !ctx.isInPlayTheBall;
+
+    if (ctx.currentTackleCount !== ctx.maxTackles - 1) {
+      ctx.firstReceiverPlayer = null;
+      ctx.firstReceiverTargetX = null;
+      ctx.firstReceiverTargetY = null;
+    }
 
     const supportDepthPixels = pitch.metersToPixels(isSetOpeningRun ? 0 : ctx.supportDepthMeters);
     const podDepthPixels = pitch.metersToPixels(isSetOpeningRun ? 0 : ctx.supportPodDepthMeters);
@@ -55,11 +64,15 @@ export class LineController {
         const desiredLineY = ctx.isBallInFlight ? ballCarrier.y - 28 : ctx.ball.y;
         const allowBackward = carrierMovingBackward;
 
-        ctx.attackingLineY = allowBackward
-          ? desiredLineY
-          : ctx.attackDirection === "north"
-            ? Math.min(ctx.attackingLineY, desiredLineY)
-            : Math.max(ctx.attackingLineY, desiredLineY);
+        if (isReforming && !ctx.isInPlayTheBall) {
+          ctx.attackingLineY = Phaser.Math.Linear(ctx.attackingLineY, desiredLineY, 0.025);
+        } else {
+          ctx.attackingLineY = allowBackward
+            ? desiredLineY
+            : ctx.attackDirection === "north"
+              ? Math.min(ctx.attackingLineY, desiredLineY)
+              : Math.max(ctx.attackingLineY, desiredLineY);
+        }
 
         if (carrierMovingBackward && carrierTouchesLine) {
           ctx.dragLineWithCarrier = true;
@@ -147,13 +160,34 @@ export class LineController {
             : Math.min(targetY, maxBehindY);
       }
 
-      const lateralLerp = role === "winger" || role === "center" ? 0.03 : 0.06;
-      const hookerXTarget =
+      // Keep support runners behind the attacking line.
+      const attackingBehindBuffer = pitch.metersToPixels(0.25);
+      const attackingBehindY = ctx.attackingLineY + supportDirection * attackingBehindBuffer;
+      targetY =
+        ctx.attackDirection === "north"
+          ? Math.max(targetY, attackingBehindY)
+          : Math.min(targetY, attackingBehindY);
+
+      const reformLerpScale = isReforming ? 0.4 : 1;
+      const lateralLerp =
+        (role === "winger" || role === "center" ? 0.03 : 0.06) * reformLerpScale;
+      let hookerXTarget =
         role === "hooker" && ctx.currentTackleCount > 0
           ? Phaser.Math.Linear(laneX, ballCarrier.x, 0.4)
           : laneX;
 
-      const depthLerp = role === "winger" || role === "center" ? 0.03 : 0.05;
+      if (
+        ctx.currentTackleCount === ctx.maxTackles - 1 &&
+        ctx.firstReceiverPlayer === attacker &&
+        ctx.firstReceiverTargetX !== null &&
+        ctx.firstReceiverTargetY !== null
+      ) {
+        hookerXTarget = Phaser.Math.Linear(hookerXTarget, ctx.firstReceiverTargetX, 0.92);
+        targetY = Phaser.Math.Linear(targetY, ctx.firstReceiverTargetY, 0.95);
+      }
+
+      const depthLerp =
+        (role === "winger" || role === "center" ? 0.03 : 0.05) * reformLerpScale;
       const desiredY = Phaser.Math.Linear(attacker.y, targetY, depthLerp);
       const forwardOnlyY =
         ctx.attackDirection === "north"
@@ -167,10 +201,32 @@ export class LineController {
     });
 
     this.positionDefenders();
+    this.applyTeamFacing();
+    this.drawDebugFieldLines();
     ctx.previousCarrierY = ballCarrier.y;
   }
 
   // ─── Defence positioning ─────────────────────────────────────────────────────
+
+  captureRuckState(): void {
+    const { ctx } = this;
+    if (!ctx.isInPlayTheBall) {
+      ctx.markerDefenders = [];
+      ctx.offsideDefendersAtRuck.clear();
+      return;
+    }
+
+    ctx.offsideLineY = this.getDefensiveLineSnapshotY();
+    ctx.markerDefenders = this.selectMarkerDefenders();
+    const offsideDefenders = this.getOffsideDefenders();
+    ctx.offsideDefendersAtRuck = new Set(offsideDefenders);
+    offsideDefenders.forEach((defender) => ctx.offsideDefenders.add(defender));
+  }
+
+  clearRuckState(): void {
+    this.ctx.markerDefenders = [];
+    this.ctx.offsideDefendersAtRuck.clear();
+  }
 
   positionDefenders(): void {
     const { ctx } = this;
@@ -179,7 +235,7 @@ export class LineController {
 
     const forwardDir = ctx.attackDirection === "north" ? -1 : 1;
     const retreatPixels = pitch.metersToPixels(ctx.defensiveRetreatMeters);
-    const markerAdvancePx = pitch.metersToPixels(2);
+    const markerAdvancePx = pitch.metersToPixels(1.3);
 
     const baseLineY = ctx.isInPlayTheBall
       ? Phaser.Math.Clamp(
@@ -194,6 +250,10 @@ export class LineController {
         );
 
     const canRush = !ctx.isInPlayTheBall && ctx.defendersCanAdvance;
+    if (ctx.isInPlayTheBall && ctx.markerDefenders.length === 0) {
+      this.captureRuckState();
+    }
+    const markerSet = new Set(ctx.markerDefenders);
     const ballCarrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
     
     // Identify fullback and wingers for backline positioning
@@ -328,6 +388,8 @@ export class LineController {
       const isInBackline = backlinePlayers.includes(defender);
 
       // Fullback or backline positioning
+      const reformLerpScale = this.scene.time.now < ctx.lineReformUntil ? 0.4 : 1;
+
       if (isFullback || isInBackline) {
         // Position 30m behind the line, but don't go over goal line
         const fullbackDepth = pitch.metersToPixels(30);
@@ -375,23 +437,31 @@ export class LineController {
         defender.haltHorizontal();
         defender.haltVertical();
         defender.setPosition(
-          Phaser.Math.Linear(defender.x, targetX, 0.04),
-          Phaser.Math.Linear(defender.y, fullbackY, 0.06),
+          Phaser.Math.Linear(defender.x, targetX, 0.04 * reformLerpScale),
+          Phaser.Math.Linear(defender.y, fullbackY, 0.06 * reformLerpScale),
         );
       } else {
         // Standard defensive line positioning
         const laneX = Phaser.Math.Linear(startX, endX, index / 12);
-        const shiftPx = pitch.metersToPixels(ctx.defensiveShiftMeters[index] ?? 0) * forwardDir;
-        const targetY =
-          ctx.isInPlayTheBall && ctx.markerDefenderIndices.includes(index)
-            ? targetLineY - markerAdvancePx * forwardDir
+        const shiftPx = ctx.isInPlayTheBall
+          ? 0
+          : pitch.metersToPixels(ctx.defensiveShiftMeters[index] ?? 0) * forwardDir;
+        let targetY =
+          ctx.isInPlayTheBall && markerSet.has(defender)
+            ? targetLineY + markerAdvancePx * forwardDir
             : targetLineY + shiftPx;
+
+        // Keep defenders behind their defensive line.
+        targetY =
+          ctx.attackDirection === "north"
+            ? Math.min(targetY, targetLineY)
+            : Math.max(targetY, targetLineY);
 
         defender.haltHorizontal();
         defender.haltVertical();
         defender.setPosition(
-          Phaser.Math.Linear(defender.x, laneX, 0.04),
-          Phaser.Math.Linear(defender.y, targetY, 0.06),
+          Phaser.Math.Linear(defender.x, laneX, 0.04 * reformLerpScale),
+          Phaser.Math.Linear(defender.y, targetY, 0.06 * reformLerpScale),
         );
       }
     });
@@ -411,33 +481,42 @@ export class LineController {
   // ─── Offside detection ───────────────────────────────────────────────────────
 
   checkDefensiveOffside(): void {
-    if (!this.ctx.isInPlayTheBall || this.ctx.defendersCanAdvance) {
+    this.refreshPersistentOffsideState();
+    if (this.ctx.offsideDefenders.size === 0 && this.ctx.offsideDefendersAtRuck.size === 0) {
       this.clearOffsideRings();
       return;
     }
-    this.drawOffsideRings(this.getOffsideDefenders());
+    this.drawOffsideRings(Array.from(this.ctx.offsideDefenders));
   }
 
   getOffsideDefenders(): Player[] {
     const { ctx } = this;
     const { pitch } = ctx;
-    const forwardDir = ctx.attackDirection === "north" ? -1 : 1;
-    const retreatLineY = Phaser.Math.Clamp(
-      ctx.playTheBallMarkY + pitch.metersToPixels(ctx.defensiveRetreatMeters) * forwardDir,
-      pitch.topTryLineY + 20,
-      pitch.bottomTryLineY - 20,
-    );
-    return ctx.defenders.filter((defender, index) => {
-      if (ctx.markerDefenderIndices.includes(index)) return false;
-      return ctx.attackDirection === "north"
-        ? defender.y > retreatLineY
-        : defender.y < retreatLineY;
+    const retreatLineY = ctx.offsideLineY ?? this.getDefensiveLineSnapshotY();
+    const markerSet = new Set(ctx.markerDefenders);
+    return ctx.defenders.filter((defender) => {
+      if (markerSet.has(defender)) return false;
+      return this.isDefenderAheadOfDefensiveLine(defender, retreatLineY);
     });
   }
 
   isDefenderOffside(defender: Player): boolean {
-    if (!this.ctx.isInPlayTheBall || this.ctx.defendersCanAdvance) return false;
-    return this.getOffsideDefenders().includes(defender);
+    this.refreshPersistentOffsideState();
+    return this.ctx.offsideDefenders.has(defender) || this.ctx.offsideDefendersAtRuck.has(defender);
+  }
+
+  private selectMarkerDefenders(): Player[] {
+    const { ctx } = this;
+    const targetX = ctx.ball.x;
+    const targetY = ctx.playTheBallMarkY;
+
+    return [...ctx.defenders]
+      .sort((a, b) => {
+        const da = Phaser.Math.Distance.Between(a.x, a.y, targetX, targetY);
+        const db = Phaser.Math.Distance.Between(b.x, b.y, targetX, targetY);
+        return da - db;
+      })
+      .slice(0, 2);
   }
 
   // ─── Graphics helpers ────────────────────────────────────────────────────────
@@ -453,6 +532,40 @@ export class LineController {
 
   clearOffsideRings(): void {
     this.ctx.offsideGraphics.clear();
+  }
+
+  private getDefensiveLineSnapshotY(): number {
+    const { ctx } = this;
+    const forwardDir = ctx.attackDirection === "north" ? -1 : 1;
+    return Phaser.Math.Clamp(
+      ctx.playTheBallMarkY + ctx.pitch.metersToPixels(ctx.defensiveRetreatMeters) * forwardDir,
+      ctx.pitch.topTryLineY + 20,
+      ctx.pitch.bottomTryLineY - 20,
+    );
+  }
+
+  private isDefenderAheadOfDefensiveLine(defender: Player, lineY: number): boolean {
+    return this.ctx.attackDirection === "north"
+      ? defender.y < lineY
+      : defender.y > lineY;
+  }
+
+  private refreshPersistentOffsideState(): void {
+    const { ctx } = this;
+    const lineY = ctx.offsideLineY;
+    if (lineY === null) return;
+
+    for (const defender of Array.from(ctx.offsideDefenders)) {
+      if (!this.isDefenderAheadOfDefensiveLine(defender, lineY)) {
+        ctx.offsideDefenders.delete(defender);
+      }
+    }
+
+    for (const defender of Array.from(ctx.offsideDefendersAtRuck)) {
+      if (!this.isDefenderAheadOfDefensiveLine(defender, lineY)) {
+        ctx.offsideDefendersAtRuck.delete(defender);
+      }
+    }
   }
 
   drawOfficialsOnDefensiveLine(lineY: number): void {
@@ -511,5 +624,60 @@ export class LineController {
     this.clearOffsideRings();
     this.ctx.controlledPlayerRingGraphics.clear();
     this.ctx.kickAimGraphics.clear();
+  }
+
+  private drawDebugFieldLines(): void {
+    const { ctx } = this;
+    if (!ctx.debugEnabled || !ctx.debugLinesGraphics) return;
+
+    const g = ctx.debugLinesGraphics;
+    const left = ctx.pitch.fieldRect.x;
+    const right = ctx.pitch.fieldRect.right;
+
+    const attackLineY = Phaser.Math.Clamp(
+      ctx.attackingLineY,
+      ctx.pitch.topTryLineY + 12,
+      ctx.pitch.bottomTryLineY - 12,
+    );
+
+    const forwardDir = ctx.attackDirection === "north" ? -1 : 1;
+    const defensiveLineY = Phaser.Math.Clamp(
+      ctx.attackingLineY + ctx.pitch.metersToPixels(ctx.defensiveLineGapMeters) * forwardDir,
+      ctx.pitch.topTryLineY + 12,
+      ctx.pitch.bottomTryLineY - 12,
+    );
+
+    g.clear();
+
+    // Offensive line (cyan)
+    g.lineStyle(2, 0x40d7ff, 0.85);
+    g.lineBetween(left, attackLineY, right, attackLineY);
+
+    // Defensive line (red)
+    g.lineStyle(2, 0xff6b57, 0.85);
+    g.lineBetween(left, defensiveLineY, right, defensiveLineY);
+  }
+
+  private syncPossessionRolesFromCarrier(): void {
+    const carrier = this.ctx.getBallCarrier();
+    if (!carrier) return;
+    const hasHomeCarrier = this.ctx.homePlayers.includes(carrier);
+    const expectedAttackingTeam: "home" | "away" = hasHomeCarrier ? "home" : "away";
+    if (this.ctx.attackingTeamId !== expectedAttackingTeam) {
+      this.ctx.setAttackingTeam(expectedAttackingTeam);
+    }
+  }
+
+  private applyTeamFacing(): void {
+    const attackFacesSouth = this.ctx.attackDirection === "south";
+    const defenseFacesSouth = !attackFacesSouth;
+
+    this.ctx.attackers.forEach((player) => {
+      player.setFlipY(attackFacesSouth);
+    });
+
+    this.ctx.defenders.forEach((player) => {
+      player.setFlipY(defenseFacesSouth);
+    });
   }
 }

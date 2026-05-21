@@ -2,11 +2,13 @@
 import { GameSettings } from "../config/settings";
 import { Ball } from "../entities/Ball";
 import { Pitch } from "../entities/Pitch";
+import { Player } from "../entities/Player";
 import { Team } from "../entities/Team";
 import { GameStateManager } from "../systems/GameStateManager";
 import { MovementController } from "../systems/MovementController";
 import { ScoringSystem } from "../systems/ScoringSystem";
 import { HUD } from "../ui/HUD";
+import { getKickoffCarrierY, getKickingTeamKickoffY } from "./play/field-positioning";
 import { getClosestPlayerByHorizontalDistance } from "./play/player-utils";
 import { KickController } from "./play/KickController";
 import { LineController } from "./play/LineController";
@@ -32,6 +34,8 @@ export class PlayScene extends Phaser.Scene {
     E: Phaser.Input.Keyboard.Key;
     SPACE: Phaser.Input.Keyboard.Key;
   };
+  private diveKey!: Phaser.Input.Keyboard.Key;
+  private startTeamId: "home" | "away" = "home";
   constructor() {
     super("PlayScene");
   }
@@ -74,6 +78,10 @@ export class PlayScene extends Phaser.Scene {
     ctx.kickAimGraphics = this.add.graphics().setDepth(1900);
     ctx.controlledPlayerRingGraphics = this.add.graphics().setDepth(1950);
     ctx.celebrationGraphics = this.add.graphics().setDepth(2100);
+    ctx.debugEnabled = import.meta.env.DEV;
+    ctx.debugLinesGraphics = ctx.debugEnabled
+      ? this.add.graphics().setDepth(1700)
+      : null;
     this.ctx = ctx;
 
     // â”€â”€ Systems â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -92,7 +100,8 @@ export class PlayScene extends Phaser.Scene {
     this.restart.createAttackUnit();
 
     ctx.ball = new Ball(this, ctx.controlledPlayer.x, ctx.controlledPlayer.y - 28, "ball");
-    ctx.ball.setCarrier(ctx.controlledPlayer);
+    ctx.ball.setCarrier(null);
+    ctx.ball.setVisible(false);
 
     // â”€â”€ Input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ctx.movement = new MovementController(this, ctx.controlledPlayer, !settings.verticalOnly);
@@ -101,6 +110,7 @@ export class PlayScene extends Phaser.Scene {
       E: Phaser.Input.Keyboard.Key;
       SPACE: Phaser.Input.Keyboard.Key;
     };
+    this.diveKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.R);
     this.kick.initKeys();
 
     // â”€â”€ Camera â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -111,13 +121,11 @@ export class PlayScene extends Phaser.Scene {
     this.hud.updateScore(home, away);
     this.hud.setDirection(ctx.getAttackingTeam().name, ctx.attackDirection);
     this.hud.setTackleCount(ctx.currentTackleCount, ctx.maxTackles);
-    this.hud.setStatus(
-      settings.verticalOnly
-        ? "Kickoff: Run up/down with W/S or Arrow keys"
-        : "Kickoff: Move with WASD or Arrow keys",
-    );
+    this.hud.setStatus("Teams coming out of the sheds...");
 
-    this.stateManager.kickoff();
+    ctx.isPrematchSequence = true;
+    this.startTeamId = Math.random() < 0.5 ? "home" : "away";
+    this.beginPrematchRunout();
 
     // â”€â”€ Menu button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     this.add
@@ -135,6 +143,10 @@ export class PlayScene extends Phaser.Scene {
   update(): void {
     const { ctx } = this;
 
+    if (ctx.isPrematchSequence) {
+      return;
+    }
+
     this.hud.attachToCamera(this.cameras.main);
     
     // Only update ball follow when not kicking
@@ -151,6 +163,12 @@ export class PlayScene extends Phaser.Scene {
 
     // â”€â”€ Kick path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     this.kick.updateInput();
+    
+      if (ctx.isKickoffSetPiece && !ctx.isKickInFlight && !ctx.isKickLoose) {
+        this.line.drawControlledPlayerRing();
+        this.hud.updateStamina(ctx.controlledPlayer.getStaminaPercent());
+        return;
+      }
 
     if (ctx.isKickCharging || ctx.isKickInFlight || ctx.isKickLoose) {
       this.kick.updateFlow();
@@ -164,10 +182,11 @@ export class PlayScene extends Phaser.Scene {
     }
 
     // â”€â”€ Normal live gameplay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if (!ctx.isInPlayTheBall) {
+    if (!ctx.isInPlayTheBall && !ctx.isDiving) {
       ctx.movement.update();
     }
 
+    this.handleDiveInput();
     this.tackle.update();
     this.handlePassingInput();
     this.line.updateAttackLineAndSupportPlayers();
@@ -177,14 +196,145 @@ export class PlayScene extends Phaser.Scene {
     // Update stamina UI
     this.hud.updateStamina(ctx.controlledPlayer.getStaminaPercent());
 
-    // â”€â”€ Try detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if (Phaser.Geom.Rectangle.Contains(ctx.pitch.topTryZone, ctx.ball.x, ctx.ball.y)) {
-      this.restart.completeTry(ctx.home, "Top end");
+    const carrier = ctx.getBallCarrier();
+    const overDeadBallLine = carrier
+      ? carrier.y <= ctx.pitch.fieldRect.y + 2 || carrier.y >= ctx.pitch.fieldRect.bottom - 2
+      : ctx.isBallInFlight && (ctx.ball.y <= ctx.pitch.fieldRect.y || ctx.ball.y >= ctx.pitch.fieldRect.bottom);
+
+    if (overDeadBallLine) {
+      this.restart.startGoalLineDropOut();
       return;
     }
-    if (Phaser.Geom.Rectangle.Contains(ctx.pitch.bottomTryZone, ctx.ball.x, ctx.ball.y)) {
-      this.restart.completeTry(ctx.away, "Bottom end");
+
+  }
+
+  private beginPrematchRunout(): void {
+    const { ctx, hud } = this;
+    const startX = ctx.pitch.fieldRect.x + 70;
+    const endX = ctx.pitch.fieldRect.right - 70;
+    const offscreenX = ctx.pitch.fieldRect.x - 180;
+
+    const awayTeam = ctx.awayPlayers;
+    const homeTeam = ctx.homePlayers;
+
+    const kickoffTeam = this.startTeamId === "home" ? homeTeam : awayTeam;
+    const receivingTeam = this.startTeamId === "home" ? awayTeam : homeTeam;
+
+    const kickoffY = getKickingTeamKickoffY(ctx.pitch, ctx.attackDirection);
+    const receivingY = getKickoffCarrierY(ctx.pitch, ctx.attackDirection);
+
+    const placeTeamAtShed = (team: typeof kickoffTeam, y: number) => {
+      team.forEach((p) => {
+        p.setPosition(offscreenX + Phaser.Math.FloatBetween(-28, 28), y + Phaser.Math.FloatBetween(-12, 12));
+        p.haltHorizontal();
+        p.haltVertical();
+        p.setScale(1);
+      });
+    };
+
+    placeTeamAtShed(awayTeam, kickoffY);
+    placeTeamAtShed(homeTeam, receivingY);
+
+    const runTeamOut = (team: typeof kickoffTeam, targetY: number, duration: number, onComplete: () => void) => {
+      let remaining = team.length;
+      team.forEach((p, i) => {
+        this.tweens.add({
+          targets: p,
+          x: Phaser.Math.Linear(startX, endX, i / 12),
+          y: targetY,
+          duration,
+          ease: "Sine.Out",
+          onComplete: () => {
+            remaining--;
+            if (remaining === 0) onComplete();
+          },
+        });
+      });
+    };
+
+    hud.setStatus(`${ctx.away.name} run out...`);
+    runTeamOut(awayTeam, kickoffY, 1300, () => {
+      hud.setStatus(`${ctx.home.name} run out...`);
+      this.time.delayedCall(250, () => {
+        runTeamOut(homeTeam, receivingY, 1300, () => {
+          this.time.delayedCall(350, () => this.beginInitialKickoffSetPiece());
+        });
+      });
+    });
+  }
+
+  private beginInitialKickoffSetPiece(): void {
+    const { ctx, hud } = this;
+    ctx.isPrematchSequence = false;
+    ctx.setAttackingTeam(this.startTeamId);
+    this.restart.resetSetState();
+
+    const kickoffY = getKickingTeamKickoffY(ctx.pitch, ctx.attackDirection);
+    const receivingY = getKickoffCarrierY(ctx.pitch, ctx.attackDirection);
+    const kickoffTeam = this.startTeamId === "home" ? ctx.homePlayers : ctx.awayPlayers;
+    const receivingTeam = this.startTeamId === "home" ? ctx.awayPlayers : ctx.homePlayers;
+    const startX = ctx.pitch.fieldRect.x + 70;
+    const endX = ctx.pitch.fieldRect.right - 70;
+
+    kickoffTeam.forEach((p, i) => p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), kickoffY));
+    receivingTeam.forEach((p, i) => p.setPosition(Phaser.Math.Linear(startX, endX, i / 12), receivingY));
+
+    const kicker = kickoffTeam[6] ?? kickoffTeam[0];
+    ctx.ball.setVisible(true);
+    ctx.ball.setCarrier(kicker);
+    ctx.ball.updateFollow();
+
+    if (this.startTeamId === "home") {
+      ctx.controlledPlayer = kicker;
+      ctx.controlledPlayer.setScale(1.12);
+      ctx.movement.setControlledPlayer(ctx.controlledPlayer);
+      this.cameras.main.startFollow(ctx.controlledPlayer, true, 0.16, 0.16);
+      this.cameras.main.centerOn(ctx.controlledPlayer.x, ctx.controlledPlayer.y);
+      this.kick.armControlledKickoff();
+    } else {
+      // Computer kickoff when away starts.
+      const receiver = receivingTeam[Phaser.Math.RND.pick([2, 4, 6, 7, 8, 9, 10])] ?? receivingTeam[6];
+      const kickStartX = kicker.x;
+      const kickStartY = kicker.y - 24;
+      const kickTargetX = receiver.x;
+      const kickTargetY = receiver.y - 28;
+      const distance = Phaser.Math.Distance.Between(kickStartX, kickStartY, kickTargetX, kickTargetY);
+
+      ctx.ball.setCarrier(null);
+      ctx.ball.setPosition(kickStartX, kickStartY);
+      ctx.isKickoffSetPiece = true;
+      ctx.kickGroundedBeforeClaim = false;
+      ctx.kickOwnerTeamId = "away";
+      ctx.kickTargetX = kickTargetX;
+      ctx.kickTargetY = kickTargetY;
+      ctx.isKickInFlight = true;
+
+      hud.setStatus("Kickoff: away team starts.");
+      this.cameras.main.startFollow(ctx.ball, true, 0.16, 0.16);
+
+      this.tweens.addCounter({
+        from: 0,
+        to: 1,
+        duration: Phaser.Math.Clamp(900 + distance, 1000, 1600),
+        ease: "Sine.InOut",
+        onUpdate: (tw) => {
+          const t = Number(tw.getValue());
+          const baseX = Phaser.Math.Linear(kickStartX, kickTargetX, t);
+          const baseY = Phaser.Math.Linear(kickStartY, kickTargetY, t);
+          const arc = Math.sin(t * Math.PI) * Math.min(130, distance * 0.22);
+          ctx.ball.setPosition(baseX, baseY - arc);
+          ctx.ball.setAngle(t * 420);
+        },
+        onComplete: () => {
+          ctx.ball.setAngle(0);
+          ctx.isKickInFlight = false;
+          ctx.isKickLoose = true;
+          this.hud.setStatus("Kick chase.");
+        },
+      });
     }
+
+    this.stateManager.kickoff();
   }
 
   // â”€â”€â”€ Passing (stays in PlayScene â€“ tightly uses tweens, cameras, and keys) â”€â”€
@@ -201,6 +351,7 @@ export class PlayScene extends Phaser.Scene {
       ctx.isKickCharging ||
       ctx.isKickInFlight ||
       ctx.isKickLoose ||
+      ctx.isDiving ||
       !ctx.isHomeTeamInPossession()
     ) return;
 
@@ -312,5 +463,99 @@ export class PlayScene extends Phaser.Scene {
     });
 
     this.hud.setStatus(`Pass ${direction < 0 ? "left" : "right"}...`);
+  }
+
+  private handleDiveInput(): void {
+    const { ctx } = this;
+    if (!Phaser.Input.Keyboard.JustDown(this.diveKey)) return;
+
+    if (
+      ctx.isDiving ||
+      ctx.isBallInFlight ||
+      ctx.isInPlayTheBall ||
+      ctx.isTurnoverPause ||
+      ctx.isForwardPassPause ||
+      ctx.isScrumPause ||
+      ctx.isKickCharging ||
+      ctx.isKickInFlight ||
+      ctx.isKickLoose ||
+      !ctx.isHomeTeamInPossession()
+    ) {
+      return;
+    }
+
+    const carrier = ctx.getBallCarrier() ?? ctx.controlledPlayer;
+    if (!ctx.homePlayers.includes(carrier)) return;
+
+    ctx.isDiving = true;
+    carrier.haltHorizontal();
+    carrier.haltVertical();
+
+    const fwdDir = ctx.attackDirection === "north" ? -1 : 1;
+    const diveMeters = Phaser.Math.FloatBetween(1, 5);
+    const totalDive = ctx.pitch.metersToPixels(diveMeters) * fwdDir;
+    const startX = carrier.x;
+    const startY = carrier.y;
+    const targetY = Phaser.Math.Clamp(
+      startY + totalDive,
+      ctx.pitch.fieldRect.y + 2,
+      ctx.pitch.fieldRect.bottom - 2,
+    );
+    const midY = Phaser.Math.Linear(startY, targetY, 0.72);
+    const xJitter = Phaser.Math.FloatBetween(-8, 8);
+
+    this.tweens.killTweensOf(carrier);
+
+    this.tweens.add({
+      targets: carrier,
+      x: startX + xJitter,
+      y: midY,
+      duration: 180,
+      ease: "Quad.Out",
+      onComplete: () => {
+        this.tweens.add({
+          targets: carrier,
+          x: startX + xJitter * 0.35,
+          y: targetY,
+          duration: 220,
+          ease: "Sine.Out",
+          onComplete: () => {
+            if (!ctx.isDiving) return;
+            ctx.isDiving = false;
+            this.resolveDiveOutcome(carrier);
+          },
+        });
+      },
+    });
+  }
+
+  private resolveDiveOutcome(carrier: Player): void {
+    const { ctx } = this;
+    const inTop = Phaser.Geom.Rectangle.Contains(ctx.pitch.topTryZone, carrier.x, carrier.y);
+    const inBottom = Phaser.Geom.Rectangle.Contains(ctx.pitch.bottomTryZone, carrier.x, carrier.y);
+    const reachedTopTryLine = carrier.y <= ctx.pitch.topTryLineY;
+    const reachedBottomTryLine = carrier.y >= ctx.pitch.bottomTryLineY;
+
+    if (ctx.attackDirection === "north") {
+      if (inTop || reachedTopTryLine) {
+        this.restart.completeTry(ctx.getAttackingTeam(), "Top end");
+        return;
+      }
+      if (inBottom || reachedBottomTryLine) {
+        this.restart.startGoalLineDropOut();
+        return;
+      }
+    } else {
+      if (inBottom || reachedBottomTryLine) {
+        this.restart.completeTry(ctx.getAttackingTeam(), "Bottom end");
+        return;
+      }
+      if (inTop || reachedTopTryLine) {
+        this.restart.startGoalLineDropOut();
+        return;
+      }
+    }
+
+    this.hud.setStatus("Dived to ground.");
   }
 }
